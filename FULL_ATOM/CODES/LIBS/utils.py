@@ -28,6 +28,9 @@ from create_full_graph_data import TrajectoryDataset
 
 import sys
 
+
+############################## data loading and preprocessing functions ##############################
+
 def get_dataset(root_dir = None,
                 tpr_file = 'MD.tpr',
                 trajectory = 'MD_with_solvent_noPBC.xtc',
@@ -341,3 +344,107 @@ def parse_config(config_file,verbose=False):
                             config[key] = value
     
     return config
+
+
+
+###################################### LOSS FUNCTIONS ######################################
+
+def KL_divergence(mu, logvar):
+    """
+    Compute the KL divergence between the learned distribution and the prior distribution.
+    
+    Args:
+        mu (torch.Tensor): Mean of the learned distribution.
+        logvar (torch.Tensor): Log variance of the learned distribution.
+    
+    Returns:
+        torch.Tensor: KL divergence value.
+    """
+    return -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
+
+
+def reconstruction_loss(pos_pred, pos_true, batch, align=True):
+    """
+    Compute the reconstruction loss between predicted and true positions.
+    The loss is computed as the mean squared error (MSE) between the predicted and true positions.
+    If `align` is True, the predicted positions are aligned to the true positions using the Kabsch algorithm.
+    Args:
+        pos_pred (torch.Tensor): Predicted positions of shape (N, 3).
+        pos_true (torch.Tensor): True positions of shape (N, 3).
+        batch (torch.Tensor): Batch indices of shape (N,) indicating which graph each point belongs to.
+        align (bool): Whether to align the predicted positions to the true positions using Kabsch algorithm.
+    Returns:
+        torch.Tensor: Mean squared error loss value.
+    """
+
+
+    total_loss = 0.0
+    num_graphs = batch.max().item() + 1 # Get number of graphs in the batch
+
+    for i in range(num_graphs):
+        # Extract points for the current graph
+        pred_mask = (batch == i)
+        true_mask = (batch == i) # Assuming batch is the same for pred/true if generated correctly
+
+        current_pos_pred = pos_pred[pred_mask]
+        current_pos_true = pos_true[true_mask]
+
+        # Ensure there are points to align (might happen with filtering/padding)
+        if current_pos_pred.shape[0] == 0 or current_pos_true.shape[0] == 0:
+            continue
+            
+        # Check if number of points match (should always match for VAE reconstruction)
+        if current_pos_pred.shape[0] != current_pos_true.shape[0]:
+            raise ValueError(f"Shape mismatch for graph {i} in batch: "
+                            f"Pred {current_pos_pred.shape}, True {current_pos_true.shape}")
+
+        if align:
+            # Align the predicted points to the true points
+            # Using Kabsch algorithm to find optimal rotation and translation
+            # This function is defined above
+            R, t = find_rigid_alignment(current_pos_pred, current_pos_true)
+            # Apply the transformation to the predicted points
+            current_pos_pred = (R @ current_pos_pred.T).T + t
+       
+        # Calculate MSE loss for this graph
+        loss_i = F.mse_loss(current_pos_pred, current_pos_true, reduction='mean')
+        total_loss += loss_i
+
+    # Average loss over the graphs in the batch
+    return total_loss / num_graphs if num_graphs > 0 else torch.tensor(0.0, device=pos_pred.device)
+
+
+
+#################################### model functions ####################################
+
+def print_model_summary(model):
+    """
+    Print a summary of the model including the number of parameters and trainable parameters.
+    Args:
+        model (torch.nn.Module): The model to summarize.
+    """
+    if not isinstance(model, torch.nn.Module):
+        raise TypeError("The model should be an instance of torch.nn.Module")
+        
+    print("="*50)
+    print("MODEL SUMMARY")
+    print("="*50)
+    
+    total_params = 0
+    trainable_params = 0
+    
+    for name, module in model.named_modules():
+        if len(list(module.children())) == 0:  # Leaf modules only
+            num_params = sum(p.numel() for p in module.parameters())
+            num_trainable = sum(p.numel() for p in module.parameters() if p.requires_grad)
+            
+            if num_params > 0:
+                print(f"{name:50} | {str(module):60} | {num_params:>10,} | {num_trainable:>10,}")
+                total_params += num_params
+                trainable_params += num_trainable
+    
+    print("="*50)
+    print(f"Total parameters: {total_params:,}")
+    print(f"Trainable parameters: {trainable_params:,}")
+    print(f"Non-trainable parameters: {total_params - trainable_params:,}")
+    print("="*50)

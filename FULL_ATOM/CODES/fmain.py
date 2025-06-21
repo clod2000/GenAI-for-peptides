@@ -25,8 +25,10 @@ from torch_geometric.nn import summary, VGAE
 from tqdm import tqdm
 import sys
 
+
 sys.path.append("LIBS")
 from LIBS.utils import *
+from LIBS.FGVAE import *
 
 import argparse 
 # Create a single parser with both arguments
@@ -39,6 +41,11 @@ args = parser.parse_args()
 config_file = args.config
 verbose = args.verbose
 
+verbose= True  # set 
+
+#Set the device
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
 # Read the parameters from the config file
 config = parse_config(config_file=config_file)
 
@@ -50,6 +57,8 @@ HIDDEN_ENCODER_CHANNELS = config.get('HIDDEN_ENCODER_CHANNELS', 256)
 HIDDEN_DECODER_CHANNELS = config.get('HIDDEN_DECODER_CHANNELS', 256)
 NUM_DEC_LAYERS = config.get('NUM_DEC_LAYERS', 5)
 NUM_EGNN_LAYERS = config.get('NUM_EGNN_LAYERS', 5)
+ATTENTION_ENCODER = config.get('ATTENTION_ENCODER', True) # if True, attention is used in the encoder
+ATTENTION_DECODER = config.get('ATTENTION_DECODER', True) # if True, attention is used in the decoder
 
 INCLUDE_ATOM_TYPE = True # if True, the first feature of the input is the atom type and ohe is applied
 SCALE_POS_FACTOR = config.get('SCALE_POS_FACTOR', 10.0)
@@ -91,4 +100,30 @@ SEED = 42
 # Create dataset and dataloaders
 dataset = get_dataset(initial_alignment=True, verbose=verbose)
 train_loader, val_loader, test_loader = get_dataloaders(dataset,verbose=verbose, batch_size=BATCHSIZE)
+
+
+# Create model
+
+model = FGVAE(
+        encoder=EGNN_Encoder(
+            in_channels=dataset[0].num_features,
+            hidden_channels_egnn=HIDDEN_ENCODER_CHANNELS,
+            num_egnn_layers=NUM_EGNN_LAYERS,
+            latent_dim=LATENT_DIM,
+            attention=ATTENTION_ENCODER,
+            verbose=verbose
+        ),
+        decoder=EGNN_Decoder(
+            latent_dim=LATENT_DIM,
+            node_feature_dim_initial=dataset[0].num_features,
+            hidden_nf=HIDDEN_DECODER_CHANNELS,
+            num_egnn_layers=NUM_DEC_LAYERS,
+            attention=ATTENTION_DECODER,
+            verbose=verbose
+        )
+    ).to(device)
+
+if verbose:
+    print_model_summary(model)
+
 
