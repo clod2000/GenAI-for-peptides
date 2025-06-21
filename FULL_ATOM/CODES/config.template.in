@@ -1,0 +1,27 @@
+LATENT_DIM: 128
+HIDDEN_ENCODER_CHANNELS: 256
+HIDDEN_DECODER_CHANNELS: 256
+NUM_DEC_LAYERS: 5
+NUM_EGNN_LAYERS: 5
+
+TYPE_SIM: A
+NAME_SIMULATION: test
+continue_from: None
+
+SCALE_FEATURES: True
+SCALE_POS_FACTOR: 10.0
+
+EPOCHS: 50
+BATCHSIZE: 64
+LEARNING_RATE: 0.0001
+BETA: None
+wait_epochs: 0
+annealing_epochs: 50
+beta_min: 1e-05
+beta_max: 0.0001
+
+DISABLE_TQDM: True
+
+
+
+# TYPE_SIM: A is the version with the custom batch that averages over the nodes instead over SCALE_FEATURES

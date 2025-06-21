@@ -1,0 +1,28 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.so
+
+# Virtual environments
+venv/
+.env/
+
+# Environment variables
+.env
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDEs and editors
+.vscode/
+*.swp
+*.swo
+.idea/
+
+# Logs
+*.log
+
+# Heavy directories
+DATA/
+RUNS/
+
