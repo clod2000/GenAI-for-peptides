@@ -305,7 +305,7 @@ class FGVAE(nn.Module):
             z = self.reparameterize(mean, log_var)
 
             # Decode
-            pos_pred, mean, log_var, batch = self.decoder(z, x, edge_index, batch)
+            pos_pred = self.decoder(z, x, edge_index, batch)
 
             return pos_pred, mean, log_var, batch
         

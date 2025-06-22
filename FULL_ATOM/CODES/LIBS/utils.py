@@ -41,7 +41,7 @@ def get_dataset(root_dir = None,
                 initial_alignment = False,
                 verbose = True
                  ):
-    
+
     """
     Function to load a dataset from a given root directory, TPR file, and trajectory file.
     It preprocesses the data by scaling positions, optionally including atom types,
@@ -318,11 +318,12 @@ def parse_config(config_file,verbose=False):
             line = line.strip()
             # Skip empty lines and comments
             if not line or line.startswith('//') or line.startswith('#'):
+                #if verbose: print(f"Skipping line: {line}")
                 continue
-            
+                
             # Parse key-value pairs
-            if ':' in line:
-                key, value = line.split(':', 1)
+            if ':' in line or '=' in line:
+                key, value = line.split(':', 1) if ':' in line else line.split('=', 1)
                 key = key.strip()
                 value = value.strip()
                 
@@ -340,8 +341,23 @@ def parse_config(config_file,verbose=False):
                             # Try to convert to float
                             config[key] = float(value)
                         except ValueError:
-                            # Keep as string
-                            config[key] = value
+                            # Handle list/array values (e.g., [256,256,128])
+                            if value.startswith('[') and value.endswith(']'):
+                                # Remove brackets and split by comma
+                                list_str = value[1:-1].strip()
+                                if list_str:  # Check if not empty
+                                    try:
+                                        config[key] = [int(x.strip()) for x in list_str.split(',')]
+                                    except ValueError:
+                                        try:
+                                            config[key] = [float(x.strip()) for x in list_str.split(',')]
+                                        except ValueError:
+                                            config[key] = [x.strip() for x in list_str.split(',')]
+                                else:
+                                    config[key] = []
+                            else:
+                                # Keep as string
+                                config[key] = value
     
     return config
 
@@ -448,3 +464,17 @@ def print_model_summary(model):
     print(f"Trainable parameters: {trainable_params:,}")
     print(f"Non-trainable parameters: {total_params - trainable_params:,}")
     print("="*50)
+
+
+def beta_annealer(epochs,beta_start = 0., beta_end = 1., annealing_epochs = 100, wait_epochs = 10):
+    
+    """
+    Compute the beta value for the current epoch.
+    If the current epoch is less than the wait_epochs, return the beta_start value.
+    Otherwise, linearly interpolate between beta_start and beta_end based on the current epoch.
+    """
+
+    if epochs < wait_epochs:
+        return beta_start
+    
+    return beta_start + (beta_end - beta_start) * min(1,((epochs-wait_epochs) / annealing_epochs))

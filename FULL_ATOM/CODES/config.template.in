@@ -1,27 +1,62 @@
-LATENT_DIM: 128
-HIDDEN_ENCODER_CHANNELS: 256
-HIDDEN_DECODER_CHANNELS: 256
-NUM_DEC_LAYERS: 5
-NUM_EGNN_LAYERS: 5
+#############################################################################################################
+#                                                                                                           #
+# Configuration file for the code "fmain.py, info about the patameters are found in the source code         #
+#                                                                                                           #
+# Author: Claudio Colturi                                                                                   #
+#                                                                                                           #
+#############################################################################################################
 
-TYPE_SIM: A
-NAME_SIMULATION: test
-continue_from: None
+#### model parameters
 
-SCALE_FEATURES: True
-SCALE_POS_FACTOR: 10.0
+# encoder
+ENCODER_TYPE = standard
+HIDDEN_ENCODER_CHANNELS = 256
+OUT_ENCODER_CHANNELS = 128 
+NUM_ENC_LAYERS = 5
+ATTENTION_ENCODER = True
+LATENT_DIM = 128
+TANH_ENCODER =  False
+NORMALIZE_ENCODER = False
 
-EPOCHS: 50
-BATCHSIZE: 64
-LEARNING_RATE: 0.0001
-BETA: None
-wait_epochs: 0
-annealing_epochs: 50
-beta_min: 1e-05
-beta_max: 0.0001
+# decoder
+MLP_DECODER_POS_SIZE = [256,256,128]
+HIDDEN_DECODER_CHANNELS = 256
+NUM_DEC_LAYERS = 5
+ATTENTION_DECODER = True
+TANH_DECODER = False
+NORMALIZE_DECODER =  False
 
-DISABLE_TQDM: True
+#### dataset parameters
+INCLUDE_ATOM_TYPE = True
+SCALE_FEATURES = True
+SCALE_POSITIONS = True
+INITIAL_ALIGNMENT = True
 
+#### training parameters
+EPOCHS = 1
+BATCHSIZE =  64
+LEARNING_RATE =  1E-4
+WEIGHT_DECAY = 0 
 
+#### Scheduler parameters
+USE_SCHEDULER =  False
+SCHEDULER_PATIENCE =  10
+SCHEDULER_FACTOR = 0.5
+SCHEDULER_TYPE = 'ReduceLROnPlateau'
+SCHEDULER_THRESHOLD =  0.0001
 
-# TYPE_SIM: A is the version with the custom batch that averages over the nodes instead over SCALE_FEATURES
+# Beta annealing parameters
+BETA = None
+wait_epochs =  5
+annealing_epochs = 50
+beta_min = 0.00001
+beta_max = 0.0001
+
+# Other parameters
+DISABLE_TQDM = False
+SEED =  42
+NAME_SIMULATION = first_test 
+CONTINUE_FROM = None
+STARTING_EPOCH = 0
+ALIGN_RECONS_LOSS = True
+TEST_MODEL = True
