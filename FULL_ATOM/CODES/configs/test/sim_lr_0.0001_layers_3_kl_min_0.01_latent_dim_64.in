@@ -16,7 +16,7 @@
 MODEL_ARCHITECTURE = hybrid_displacement
 
 # If using 'hybrid_displacement', this is the dimension for the flattened coordinate projection.
-ENCODER_POS_PROJECTION_DIM = 64
+ENCODER_POS_PROJECTION_DIM : 64
 
 
 ##########################################
@@ -30,16 +30,16 @@ ENCODER_POS_PROJECTION_DIM = 64
 ENCODER_TYPE = standard
 HIDDEN_ENCODER_CHANNELS = 256
 OUT_ENCODER_CHANNELS = 128 
-NUM_ENC_LAYERS = 5
+NUM_ENC_LAYERS: 3
 ATTENTION_ENCODER = True
-LATENT_DIM = 128
+LATENT_DIM: 64
 TANH_ENCODER =  False
 NORMALIZE_ENCODER = False
 
 # decoder
 MLP_DECODER_POS_SIZE = [256,256,128]
 HIDDEN_DECODER_CHANNELS = 256
-NUM_DEC_LAYERS = 5
+NUM_DEC_LAYERS: 3
 ATTENTION_DECODER = True
 TANH_DECODER = False
 NORMALIZE_DECODER =  False
@@ -51,9 +51,9 @@ SCALE_POSITIONS = True
 INITIAL_ALIGNMENT = False
 
 #### training parameters
-EPOCHS = 1
+EPOCHS: 0
 BATCHSIZE =  64
-LEARNING_RATE =  1E-5
+LEARNING_RATE: 0.0001
 WEIGHT_DECAY = 0 
 
 #### Scheduler parameters
@@ -73,8 +73,8 @@ beta_max = 0.01
 # Other parameters
 DISABLE_TQDM = True
 SEED =  42
-NAME_SIMULATION = first_test 
-NAME_FOLDER = template
+NAME_SIMULATION: sim_lr_0.0001_layers_3_kl_min_0.01_latent_dim_64
+NAME_FOLDER: "test"
 CONTINUE_FROM = None
 STARTING_EPOCH = 0
 ALIGN_RECONS_LOSS = True

@@ -478,3 +478,202 @@ def beta_annealer(epochs,beta_start = 0., beta_end = 1., annealing_epochs = 100,
         return beta_start
     
     return beta_start + (beta_end - beta_start) * min(1,((epochs-wait_epochs) / annealing_epochs))
+
+
+
+
+
+
+
+
+
+
+
+############################# Visualization functions #############################
+
+
+#### Function used in notebook_lr_layers
+
+# function used to plot a dataset of graphs in 3D, used to check alignment and scaling of the graphs
+def plot_graph_dataset(dataset, n_graphs, ax = None, title='Graph'):
+
+    palette = ["r", "g", "b", "y", "c", "m", "k"]
+    k=0
+    if ax is None:
+        fig = plt.figure(figsize=(10, 10))
+        ax = fig.add_subplot(111, projection='3d')
+        k=1
+    for i in range(n_graphs):
+       
+        if i >= len(dataset):
+            print(f"Graph index {i} out of range. Only {len(data)} graphs available.")
+            return
+        
+        data = dataset[i]
+
+
+        G = to_networkx(data, to_undirected=True)
+        pos = data.pos.numpy()
+    
+        # Draw nodes
+        ax.scatter(pos[:, 0], pos[:, 1], pos[:, 2], c= palette[i % len(palette)], s=50, label=f'graph_{i+1}')
+        
+        # Draw edges
+        for edge in G.edges():
+            x = [pos[edge[0], 0], pos[edge[1], 0]]
+            y = [pos[edge[0], 1], pos[edge[1], 1]]
+            z = [pos[edge[0], 2], pos[edge[1], 2]]
+            ax.plot(x, y, z, color = palette[i % len(palette)], alpha=0.5, linewidth=1)
+        
+    ax.set_title(title)
+    if k == 1:
+        ax.legend()
+        plt.tight_layout()
+        plt.show()
+    else:
+        ax.legend()
+        plt.tight_layout()
+        return ax
+
+
+
+# function to plot the predicted graph positions and the true graph positions
+def plot_graph_pred(pos, true_pos_graph, ax = None, title='Graph',planewise=False):
+    """
+    Function to plot the predicted graph positions and the true graph positions.
+    If `planewise` is True, it will plot the graph in three different planes (XY, XZ, YZ).
+    If `ax` is None, it will create a new figure and axes for the plot. 
+    If `ax` is provided, it will use the provided axes for plotting.
+    Args:
+        pos (torch.Tensor): Predicted positions of the graph nodes of shape (N, 3).
+        true_pos_graph (Data): True graph data containing the true positions and edge indices.
+        ax (matplotlib.axes.Axes, optional): Axes to plot on. If None, a new figure and axes will be created.
+        title (str, optional): Title of the plot. Defaults to 'Graph'.
+        planewise (bool, optional): If True, plot in three different planes (XY, XZ, YZ). Defaults to False.
+    Returns:
+        ax (matplotlib.axes.Axes): The axes with the plotted graph.
+    """
+    if not isinstance(true_pos_graph, Data):
+        raise TypeError("true_pos_graph should be an instance of torch_geometric.data.Data")
+    
+    k=0
+    if ax is None:
+
+        
+        if not planewise:
+            fig = plt.figure(figsize=(10, 10))
+            ax = fig.add_subplot(111, projection='3d')
+            k=1
+        else:
+            fig = plt.figure(figsize=(15, 5))
+            k=0
+   
+        palette = ["r", "g", "b", "y", "c", "m", "k"]
+
+
+        G = to_networkx(true_pos_graph, to_undirected=True)
+        pos_true = true_pos_graph.pos.numpy()
+
+        graph_pred = true_pos_graph.clone()
+        graph_pred.pos = pos
+        G_pred = to_networkx(graph_pred, to_undirected=True)
+
+        pos_pred = graph_pred.pos.numpy()
+
+        if planewise:
+            if ax is not None:
+                raise ValueError("When planewise is True, ax should be None to create subplots.")
+            # Plot each plane separately
+            ax_names = ['X-Y Plane', 'X-Z Plane', 'Y-Z Plane']
+            ax_names_labels = ['X-axis', 'Y-axis', 'Z-axis']
+            for i in range(3):
+                ax = fig.add_subplot(1, 3, i + 1)
+                ax.set_title(ax_names[i])
+                ax.set_xlabel(ax_names_labels[i % 3])
+                ax.set_ylabel(ax_names_labels[(i + 1) % 3])
+
+                if i == 0:
+                    pos_true_plane = pos_true[:, [0, 1, 2]]
+                    pos_pred_plane = pos_pred[:, [0, 1, 2]]
+                elif i == 1:
+                    pos_true_plane = pos_true[:, [0, 2, 1]]
+                    pos_pred_plane = pos_pred[:, [0, 2, 1]]
+                else:
+                    pos_true_plane = pos_true[:, [1, 2, 0]]
+                    pos_pred_plane = pos_pred[:, [1, 2, 0]]
+
+                # Draw nodes
+                ax.scatter(pos_true_plane[:, 0], pos_true_plane[:, 1],color=palette[0], s=50, label='graph_true')
+                ax.scatter(pos_pred_plane[:, 0], pos_pred_plane[:, 1], color=palette[1], s=50, label='graph_pred')
+
+                # Draw edges
+                if i == 0:
+                    pos_true_edges = pos_true[:, [0, 1, 2]]
+                    pos_pred_edges = pos_pred[:, [0, 1, 2]]
+                elif i == 1:
+                    pos_true_edges = pos_true[:, [0, 2, 1]]
+                    pos_pred_edges = pos_pred[:, [0, 2, 1]]
+                else:
+                    pos_true_edges = pos_true[:, [1, 2, 0]]
+                    pos_pred_edges = pos_pred[:, [1, 2, 0]]
+
+                for edge in G.edges():
+                    x = [pos_true_edges[edge[0], 0], pos_true_edges[edge[1], 0]]
+                    y = [pos_true_edges[edge[0], 1], pos_true_edges[edge[1], 1]]
+                    ax.plot(x, y, color=palette[0], alpha=0.5, linewidth=1)
+
+                for edge in G_pred.edges():
+                    x = [pos_pred_edges[edge[0], 0], pos_pred_edges[edge[1], 0]]
+                    y = [pos_pred_edges[edge[0], 1], pos_pred_edges[edge[1], 1]]
+                    ax.plot(x, y, color=palette[1], alpha=0.5, linewidth=1)
+                    ax.grid(True)
+
+        else:
+            ax.set_title(title)
+            ax.set_xlabel('X-axis')
+            ax.set_ylabel('Y-axis')
+            ax.set_zlabel('Z-axis')
+
+            # Project the 3D positions onto the XY plane for visualization
+            pos_true_plane = pos_true[:, [0, 1, 2]]
+            pos_pred_plane = pos_pred[:, [0, 1, 2]]
+
+
+        if not planewise:
+        # Draw nodes
+            ax.scatter(pos_true_plane[:, 0], pos_true_plane[:, 1], pos_true_plane[:, 2], color = palette[0], s=50, label=f'graph_true')
+
+            ax.scatter(pos_pred_plane[:, 0], pos_pred_plane[:, 1], pos_pred_plane[:, 2], color = palette[1], s=50, label=f'graph_pred')
+
+            # Draw edges
+            for edge in G.edges():
+                x = [pos_true[edge[0], 0], pos_true[edge[1], 0]]
+                y = [pos_true[edge[0], 1], pos_true[edge[1], 1]]
+                z = [pos_true[edge[0], 2], pos_true[edge[1], 2]]
+                ax.plot(x, y, z, alpha=0.5, color=palette[0], linewidth=1)
+
+            for edge in G_pred.edges():
+                x = [pos_pred[edge[0], 0], pos_pred[edge[1], 0]]
+                y = [pos_pred[edge[0], 1], pos_pred[edge[1], 1]]
+                z = [pos_pred[edge[0], 2], pos_pred[edge[1], 2]]
+                ax.plot(x, y, z, alpha=0.5, color=palette[1], linewidth=1)
+
+            
+            ax.quiver(pos_true[:, 0], pos_true[:, 1], pos_true[:, 2],
+                        pos_pred[:, 0] - pos_true[:, 0],
+                        pos_pred[:, 1] - pos_true[:, 1],
+                        pos_pred[:, 2] - pos_true[:, 2],
+                        color='k', alpha=0.4, linewidth =2, arrow_length_ratio = 0.05, label ='Displacement Vectors')
+
+
+    if k == 1:
+        ax.legend()
+        plt.tight_layout()
+        plt.show()
+    else:
+        
+        ax.legend()
+        plt.tight_layout()
+        return ax
+
+

@@ -25,6 +25,7 @@ from torch_geometric.nn import summary, VGAE
 from tqdm import tqdm
 import sys
 
+from torch.optim.lr_scheduler import CosineAnnealingLR, StepLR, ReduceLROnPlateau
 
 sys.path.append("LIBS")
 from LIBS.utils import *
@@ -57,10 +58,14 @@ except Exception as e:
     print(f"Error reading config file: {e}")
     sys.exit(1)
 
-print(f"Configuration parameters: {config}")
+if verbose: print(f"Configuration parameters: {config}")
 
 #exit()
 
+
+# Architecture parameters
+MODEL_ARCHITECTURE = config.get('MODEL_ARCHITECTURE', 'original') # architecture of the model, can be 'original' or 'hybrid_displacement'
+ENCODER_POS_PROJECTION_DIM = config.get('ENCODER_POS_PROJECTION_DIM', 64) # dimension of the position projection in the encoder, used to project the positions to a lower dimension if 'hybrid_displacement' is used
 #### model parameters
 # encoder
 ENCODER_TYPE = config.get('ENCODER_TYPE', 'standard') # type of the encoder, can be 'standard' or TO BE DEFINED
@@ -109,10 +114,13 @@ beta_max = config.get('beta_max', 0.0001)
 DISABLE_TQDM = config.get('DISABLE_TQDM', False) # if True, the tqdm progress bar is disabled
 SEED = config.get('SEED', 42) # seed for reproducibility
 NAME_SIMULATION = config.get('NAME_SIMULATION', None ) # name of the simulation, used to create a folder to save the model
+NAME_FOLDER = config.get('NAME_FOLDER', 'template') # name of the folder to save the model, if None, the folder will be created with the name of the model architecture and encoder type
 CONTINUE_FROM = config.get('continue_from', None) # set the path to the model to continue training from, if None, the training will start from scratch
 STARTING_EPOCH = config.get('starting_epoch', 0) # if CONTINUE_FROM is not None, the training will start from this epoch
 ALIGN_RECONS_LOSS = config.get('ALIGN_RECONS_LOSS', True) # if True, samples are aligned before computing the reconstruction loss, otherwise the reconstruction loss is computed without alignment
 TEST_MODEL = config.get('TEST_MODEL', False) # if True, the model is tested after training
+MIN_KL = config.get('MIN_KL', 0.0001) # minimum value for the KL divergence loss, if the KL divergence is below this value, the total loss is set to the reconstruction loss only
+
 
 if CONTINUE_FROM is None: 
     STARTING_EPOCH = 0 # if CONTINUE_FROM is None, the training will start from epoch 0
@@ -142,14 +150,34 @@ train_loader, val_loader, test_loader = get_dataloaders(
     verbose=verbose
 )
 
+# Calculate the mean structure if needed 
+pos_ref = None
+if MODEL_ARCHITECTURE == 'hybrid_displacement':
+    if verbose: print("Calculating mean reference structure for the hybrid model...")
+    
+    # Use the dataset directly instead of the DataLoader to avoid batching complications
+    all_pos = torch.stack([data.pos for data in dataset], dim=0)  # Shape: (num_graphs, num_atoms, 3)
+    pos_ref = all_pos.mean(dim=0).to(device)  # Shape: (num_atoms, 3)
+    
+    if verbose: print(f"Reference structure created with shape: {pos_ref.shape}")
+    if verbose: print(f"Single graph reference shape: {pos_ref.shape}")
+    if verbose: print(f"Used {len(dataset)} graphs to calculate mean structure")
+    if verbose: print()
+
+
 # Create the model
 model = FGVAE(
         encoder=EGNN_Encoder(
             in_channels=dataset[0].num_features,
             hidden_channels_egnn=HIDDEN_ENCODER_CHANNELS,
+            out_channels_egnn=OUT_ENCODER_CHANNELS,
             num_egnn_layers=NUM_ENC_LAYERS,
             latent_dim=LATENT_DIM,
             attention=ATTENTION_ENCODER,
+            architecture=MODEL_ARCHITECTURE,
+            pos_projection_dim=ENCODER_POS_PROJECTION_DIM,
+            tanh=TANH_ENCODER,
+            normalize=NORMALIZE_ENCODER,
             verbose=verbose
         ),
         decoder=EGNN_Decoder(
@@ -158,11 +186,16 @@ model = FGVAE(
             hidden_nf=HIDDEN_DECODER_CHANNELS,
             num_egnn_layers=NUM_DEC_LAYERS,
             attention=ATTENTION_DECODER,
+            architecture=MODEL_ARCHITECTURE,
+            pos_MLP_size=MLP_DECODER_POS_SIZE,
+            tanh=TANH_DECODER,
+            normalize=NORMALIZE_DECODER,
+
             verbose=verbose
         )
     ).to(device)
 
-if verbose: print_model_summary(model)
+#if verbose: print_model_summary(model)
 
 # Create the optimizer
 optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
@@ -170,44 +203,51 @@ optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=
 # Create the scheduler
 if USE_SCHEDULER:
     if SCHEDULER_TYPE == 'CosineAnnealingLR':
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=EPOCHS) # never used, could need  other implementation
+        scheduler = CosineAnnealingLR(optimizer, T_max=EPOCHS) # never used, could need  other implementation
     elif SCHEDULER_TYPE == 'StepLR':
-        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=SCHEDULER_PATIENCE, gamma=SCHEDULER_FACTOR)
+        scheduler = StepLR(optimizer, step_size=SCHEDULER_PATIENCE, gamma=SCHEDULER_FACTOR)
     elif SCHEDULER_TYPE == 'ReduceLROnPlateau':
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=SCHEDULER_FACTOR, patience=SCHEDULER_PATIENCE, threshold=SCHEDULER_THRESHOLD, min_lr=1e-6)
-    else:
+        scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=SCHEDULER_FACTOR, patience=SCHEDULER_PATIENCE, threshold=SCHEDULER_THRESHOLD, min_lr=1e-6)
+    else: 
         raise ValueError(f"Unknown scheduler type: {SCHEDULER_TYPE}")
 
 # Define the path to save the models, use numbers to define new simulations 
 if NAME_SIMULATION is not None:
-    file_path = f'../RUNS/model_{ENCODER_TYPE}/{NAME_SIMULATION}/'
+    file_path = f'../RUNS/{MODEL_ARCHITECTURE}/{NAME_FOLDER}/{NAME_SIMULATION}/'
     if os.path.exists(file_path):
         print(f"Directory {file_path} already exists. Adding # to the name.")
         # If the directory already exists, append a number to the name
         i = 0
         while os.path.exists(file_path):
             i += 1
-            file_path = f'../RUNS/model_{ENCODER_TYPE}/{NAME_SIMULATION}_{i}/'
+            file_path = f'../RUNS/{MODEL_ARCHITECTURE}/{NAME_FOLDER}/{NAME_SIMULATION}_{i}/'
         print(f"Creating directory {file_path}")
         os.makedirs(file_path)
 else:
     i = 1
     while True:
-        if not os.path.exists(f'../RUNS/model_{ENCODER_TYPE}/simulation_{i}'):
+        if not os.path.exists(f'../RUNS/{MODEL_ARCHITECTURE}/{NAME_FOLDER}/simulation_{i}'):
             print(f"Creating directory for simulation {i}")
-            os.makedirs(f'../RUNS/model_{ENCODER_TYPE}/simulation_{i}')
-            file_path = f'../RUNS/model_{ENCODER_TYPE}/simulation_{i}/'
+            os.makedirs(f'../RUNS/{MODEL_ARCHITECTURE}/{NAME_FOLDER}/simulation_{i}')
+            file_path = f'../RUNS/{MODEL_ARCHITECTURE}/{NAME_FOLDER}/simulation_{i}/'
             break
         i += 1
 
+if not os.path.exists(file_path):
+    print(f"Creating directory {file_path}")
+    os.makedirs(file_path)
 # Copy the config file to the model folder
 os.system(f'cp {config_file} {file_path}')
+
+
 
 # Create a SummaryWriter to log the training process
 writer = SummaryWriter(log_dir=file_path)   
 
 
 # Training loop
+
+lr = LEARNING_RATE
 
 for epoch in range(STARTING_EPOCH, STARTING_EPOCH +EPOCHS):
 
@@ -234,15 +274,26 @@ for epoch in range(STARTING_EPOCH, STARTING_EPOCH +EPOCHS):
         data = data.to(device)
         optimizer.zero_grad()
 
-        pos_pred, mean, log_var, batch_vec = model(data)
-        
+
+
+        pos_pred, mean, log_var, batch_vec = model(data, pos_ref=pos_ref)
+
         kl_loss = KL_divergence(mean, log_var)
         recon_loss = reconstruction_loss(pos_pred,data.pos,data.batch, align = ALIGN_RECONS_LOSS)
 
-        total_loss = recon_loss + beta * kl_loss
+        # kl loss is Nan 
+        if kl_loss.isnan().any() or recon_loss.isnan().any():
+            print(f"Warning: kl_loss or recon_loss is NaN. Aborting the code.")
+            sys.exit(1)
 
+        if kl_loss < MIN_KL:  # set a minimum value for the kl_divergence
+            total_loss = recon_loss
+        else:
+            total_loss = recon_loss + beta*kl_loss
         # Clip gradients to avoid exploding gradients
-        #torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10.0)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
+        total_loss.backward()
         optimizer.step()
 
         if total_loss.item() > 1000:
@@ -278,7 +329,7 @@ for epoch in range(STARTING_EPOCH, STARTING_EPOCH +EPOCHS):
         for data in val_loader:
 
             data = data.to(device)
-            pos_pred, mean, log_var, batch_vec = model(data)
+            pos_pred, mean, log_var, batch_vec = model(data, pos_ref=pos_ref)
             kl_loss = KL_divergence(mean, log_var)
             recon_loss = reconstruction_loss(pos_pred,data.pos,data.batch, align = ALIGN_RECONS_LOSS)
 
@@ -304,6 +355,9 @@ for epoch in range(STARTING_EPOCH, STARTING_EPOCH +EPOCHS):
         torch.save(model.state_dict(), file_path + f'model_epoch_{epoch+1}.pth')
         if verbose: print(f"Model saved to {file_path}model_epoch_{epoch+1}.pth")
 
+
+    if (epoch + 1) % 10 == 0 or epoch == EPOCHS - 1:
+
         if TEST_MODEL:
             #################################### Test the model ########################################
             print()
@@ -319,11 +373,12 @@ for epoch in range(STARTING_EPOCH, STARTING_EPOCH +EPOCHS):
             for data in test_loader:
                 data = data.to(device)
                 with torch.no_grad():
-            
-                    pos_pred, mean, log_var, batch_vec = model(data)
-                    total_loss, recon_loss, kl_loss = model.loss_function(
-                        pos_pred, data.pos, mean, log_var, batch_vec
-                    )
+
+                    pos_pred, mean, log_var, batch_vec = model(data, pos_ref=pos_ref)
+                    kl_loss = KL_divergence(mean, log_var)
+                    recon_loss = reconstruction_loss(pos_pred, data.pos, data.batch, align=ALIGN_RECONS_LOSS)
+                    total_loss = recon_loss + beta * kl_loss
+
                     pred_pos_list.append(pos_pred.detach().cpu().numpy())
                     true_pos_list.append(data.pos.detach().cpu().numpy())
                     recon_loss_list.append(recon_loss.item())
@@ -370,8 +425,12 @@ for epoch in range(STARTING_EPOCH, STARTING_EPOCH +EPOCHS):
             ax.text2D(0.05, 0.95, f'(aligned) MSE: {np.round(float(aligned_mse.item()),4)}', transform=ax.transAxes, fontsize=12, verticalalignment='top')
             ax.set_title('True vs Aligned Predicted Coordinates for Best Reconstruction')
             plt.legend()
+            # Save the figure
+            if not os.path.exists(file_path + 'test_reconstruction'):
+                os.makedirs(file_path + 'test_reconstruction')  
+            if not file_path.endswith('/'):
+                file_path += '/'    
             plt.savefig(file_path + f'test_reconstruction/aligned_best_reconstruction_{epoch+1}_epochs.png')
 
             print("Done!")
-
 
