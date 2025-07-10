@@ -13,7 +13,8 @@
 # Defines the overall VAE architecture. Can be 'original' or 'hybrid_displacement'.
 # 'original': The initial implementation.
 # 'hybrid_displacement': The new model that uses an explicit encoder and a displacement decoder.
-MODEL_ARCHITECTURE = hybrid_displacement
+MODEL_ARCHITECTURE = original 
+#hybrid_displacement
 
 # If using 'hybrid_displacement', this is the dimension for the flattened coordinate projection.
 ENCODER_POS_PROJECTION_DIM = 64
@@ -51,9 +52,9 @@ SCALE_POSITIONS = True
 INITIAL_ALIGNMENT = False
 
 #### training parameters
-EPOCHS = 1
+EPOCHS = 30
 BATCHSIZE =  64
-LEARNING_RATE =  1E-5
+LEARNING_RATE =  1E-4
 WEIGHT_DECAY = 0 
 
 #### Scheduler parameters
@@ -73,8 +74,8 @@ beta_max = 0.01
 # Other parameters
 DISABLE_TQDM = True
 SEED =  42
-NAME_SIMULATION = first_test 
-NAME_FOLDER = template
+NAME_SIMULATION = sim_noriginal
+NAME_FOLDER = original_notebook
 CONTINUE_FROM = None
 STARTING_EPOCH = 0
 ALIGN_RECONS_LOSS = True
