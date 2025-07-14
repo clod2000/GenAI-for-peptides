@@ -45,8 +45,7 @@ The main script for configuring, training, and evaluating the VAE models. Parame
 
 ### `LIBS/`
 A library directory holding implementation of the EGNN layers, VAE architecture, and utility functions for data loading and processing.
-*NOTE*: the "egnn_clean.py" library is taken from [https://github.com/vgsatorras/egnn/blob/3c079e7267dad0aa6443813ac1a12425c3717558/models/egnn_clean/egnn_clean.py#L119](this link)
-
+*NOTE*: the "egnn_clean.py" library is taken from https://github.com/vgsatorras/egnn/tree/3c079e7267dad0aa6443813ac1a12425c3717558
 ### `notebook_hybrid.ipynb`
 A Jupyter notebook for experiments and exploratory data analysis, demonstrating the use of the main library components.
 
