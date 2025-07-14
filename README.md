@@ -16,8 +16,7 @@ The main objective of this project is to develop and explore Variational Autoenc
 
 ## Project Structure
 
-Below is a schematic tree of the main directories and files (partial, see [full code listing](https://github.com/clod2000/GenAI-for-peptides)):
-
+Below is a schematic tree of the main directories and files:
 ```
 GenAI-for-peptides/
 └── FULL_ATOM/
@@ -35,9 +34,9 @@ GenAI-for-peptides/
         └── configs/
             └── test/
                 └── sim_lr_0.0001_layers_3_kl_min_0.01_latent_dim_64.in
+ └── DIHEDRALS/                     # Version of a simpler GVAE that captures only dihedral angles ( code already exists, still need to be cleaned and commented)
 ```
 
-> **Note:** This is only a partial listing due to search limitations. More files and directories may exist in the repository. Please refer to the [GitHub repository](https://github.com/clod2000/GenAI-for-peptides) for the full structure.
 
 ## Main Components
 
@@ -46,6 +45,7 @@ The main script for configuring, training, and evaluating the VAE models. Parame
 
 ### `LIBS/`
 A library directory holding implementation of the EGNN layers, VAE architecture, and utility functions for data loading and processing.
+*NOTE*: the "egnn_clean.py" library is taken from [https://github.com/vgsatorras/egnn/blob/3c079e7267dad0aa6443813ac1a12425c3717558/models/egnn_clean/egnn_clean.py#L119](this link)
 
 ### `notebook_hybrid.ipynb`
 A Jupyter notebook for experiments and exploratory data analysis, demonstrating the use of the main library components.
