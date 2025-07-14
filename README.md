@@ -7,7 +7,7 @@ This repository contains the code and resources for my master's thesis, focused 
 The main objective of this project is to develop and explore Variational Autoencoders (VAEs) enhanced with geometric neural networks (notably EGNNs) for learning and generating peptide structures from molecular dynamics data. The codebase is built with a strong emphasis on modularity, making it suitable for rapid prototyping and experimentation.
 
 ## Features
-
+- **Automated conversion of MD trajectories into full-atom graph representations** using customizable preprocessing scripts.
 - **Full-atom graph-based representation of peptides.**
 - **Flexible VAE architectures** (original and hybrid displacement).
 - **Support for trajectory data preprocessing and feature scaling.**
@@ -20,21 +20,21 @@ Below is a schematic tree of the main directories and files:
 ```
 GenAI-for-peptides/
 └── FULL_ATOM/
-    └── CODES/
-        ├── fmain.py                # Main entry point for full-atom VAE training
-        ├── single_sim.sh           # Bash script for running simulation batches
-        ├── test.sh                 # Bash script for test runs with different hyperparameters
-        ├── config.template.in      # Template config for experiments
-        ├── notebook_hybrid.ipynb   # Reference Jupyter notebook
-        ├── LIBS/
-        │   ├── FGVAE.py            # VAE model definition with EGNN encoder
-        │   ├── egnn_clean.py       # EGNN layer implementation (adapted from original source)
-        │   ├── utils.py            # Data handling and utility functions
-        │   └── create_full_graph_data.py # Graph data preprocessing and visualization
-        └── configs/
-            └── test/
-                └── sim_lr_0.0001_layers_3_kl_min_0.01_latent_dim_64.in
- └── DIHEDRALS/                     # Version of a simpler GVAE that captures only dihedral angles ( code already exists, still need to be cleaned and commented)
+│    └── CODES/
+│        ├── fmain.py                # Main entry point for full-atom VAE training
+│        ├── single_sim.sh           # Bash script for running simulation batches
+│        ├── test.sh                 # Bash script for test runs with different hyperparameters
+│        ├── config.template.in      # Template config for experiments
+│        ├── notebook_hybrid.ipynb   # Reference Jupyter notebook
+│        ├── LIBS/
+│        │   ├── FGVAE.py            # VAE model definition with EGNN encoder
+│        │   ├── egnn_clean.py       # EGNN layer implementation (adapted from original source)
+│        │   ├── utils.py            # Data handling and utility functions
+│        │   └── create_full_graph_data.py # Graph data preprocessing and visualization
+│        └── configs/
+│            └── test/
+│                └── sim_lr_0.0001_layers_3_kl_min_0.01_latent_dim_64.in
+└── DIHEDRALS/                     # Version of a simpler GVAE that captures only dihedral angles ( code already exists, still need to be cleaned and commented)
 ```
 
 
@@ -43,9 +43,32 @@ GenAI-for-peptides/
 ### `fmain.py`
 The main script for configuring, training, and evaluating the VAE models. Parameters are set via a config file.
 
-### `LIBS/`
+## `LIBS/`
 A library directory holding implementation of the EGNN layers, VAE architecture, and utility functions for data loading and processing.
 *NOTE*: the "egnn_clean.py" library is taken from https://github.com/vgsatorras/egnn/tree/3c079e7267dad0aa6443813ac1a12425c3717558
+ 
+### LIBS/create_full_graph_data.py
+
+This script is the foundation for converting MD simulation data (GROMACS .tpr/.xtc) into a dataset of molecular graphs suitable for geometric deep learning:
+
+    - TrajectoryDataset class: Loads MD trajectories, selects atoms, computes static features (atom type, charge, etc.), and generates edge indices from chemical bonds.
+    - Automatic batching: Processes every frame of the trajectory into a graph object (PyTorch Geometric).
+    - Visualization: Includes functions for 2D/3D graph plotting with per-atom coloring, saving images for reports or debugging.
+    - Extensible feature engineering: Allows easy addition of new atomic features.
+    - CLI Example: The file can be run directly to create datasets and plot sample graphs.
+
+### LIBS/utils.py
+
+A companion module providing essential utilities for downstream modeling:
+
+    - get_dataset: Loads, preprocesses, scales, and optionally aligns graph datasets; handles one-hot encoding of atom types and feature normalization.
+    - find_rigid_alignment: Implements the Kabsch algorithm for frame alignment (crucial for geometric losses).
+    - get_dataloaders: Automatically splits graph datasets into training/validation/test sets and constructs PyTorch DataLoaders.
+    - parse_config: Reads experiment parameters from config files.
+    - Loss functions: Provides KL-divergence and advanced position reconstruction loss with batch alignment.
+    - Visualization: Includes high-level plotting routines for datasets and model predictions, supporting both 2D and 3D.
+
+
 ### `notebook_hybrid.ipynb`
 A Jupyter notebook for experiments and exploratory data analysis, demonstrating the use of the main library components.
 
