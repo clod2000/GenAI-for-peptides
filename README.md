@@ -1,73 +1,73 @@
 # GenAI-for-peptides
 
-This repository contains the code and resources for my master's thesis, focused on the application of generative artificial intelligence and geometric deep learning to peptide molecular data. The project is a work in progress and is organized in a modular and well-structured way to enable flexibility and extensibility for future developments.
+This repository contains the code and resources for my master's thesis, which focuses on applying generative artificial intelligence and geometric deep learning to peptide molecular data. The project aims to advance the modeling and generation of peptide structures using modern machine learning techniques.
 
 ## Project Overview
 
-The main objective of this project is to develop and explore Variational Autoencoders (VAEs) enhanced with geometric neural networks (notably EGNNs) for learning and generating peptide structures from molecular dynamics data. The codebase is built with a strong emphasis on modularity, making it suitable for rapid prototyping and experimentation.
+The main objective of this project is to develop and explore Variational Autoencoders (VAEs) enhanced with geometric neural networks (notably EGNNs) for learning and generating peptide structures from molecular dynamics (MD) simulations.
 
 ## Features
+
 - **Automated conversion of MD trajectories into full-atom graph representations** using customizable preprocessing scripts.
-- **Full-atom graph-based representation of peptides.**
-- **Flexible VAE architectures** (original and hybrid displacement).
+- **Full-atom graph-based modeling of peptides.**
+- **Flexible VAE architectures** (including original and hybrid displacement versions).
 - **Support for trajectory data preprocessing and feature scaling.**
-- **Customizable training scripts with configuration templating.**
+- **Customizable training scripts with configuration templates.**
 - **Visualization utilities for molecular graph data.**
 
 ## Project Structure
 
-Below is a schematic tree of the main directories and files:
+Below is a schematic overview of the main directories and files:
 ```
 GenAI-for-peptides/
-└── FULL_ATOM/
-│    └── CODES/
-│        ├── fmain.py                # Main entry point for full-atom VAE training
-│        ├── single_sim.sh           # Bash script for running simulation batches
-│        ├── test.sh                 # Bash script for test runs with different hyperparameters
-│        ├── config.template.in      # Template config for experiments
-│        ├── notebook_hybrid.ipynb   # Reference Jupyter notebook
-│        ├── LIBS/
-│        │   ├── FGVAE.py            # VAE model definition with EGNN encoder
-│        │   ├── egnn_clean.py       # EGNN layer implementation (adapted from original source)
-│        │   ├── utils.py            # Data handling and utility functions
-│        │   └── create_full_graph_data.py # Graph data preprocessing and visualization
-│        └── configs/
-│            └── test/
-│                └── sim_lr_0.0001_layers_3_kl_min_0.01_latent_dim_64.in
-└── DIHEDRALS/                     # Version of a simpler GVAE that captures only dihedral angles ( code already exists, still need to be cleaned and commented)
+├── FULL_ATOM/
+│   └── CODES/
+│       ├── fmain.py                  # Main entry point for full-atom VAE training
+│       ├── single_sim.sh             # Bash script for running simulation batches
+│       ├── test.sh                   # Bash script for test runs with different hyperparameters
+│       ├── config.template.in        # Template config for experiments
+│       ├── notebook_hybrid.ipynb     # Reference Jupyter notebook
+│       ├── LIBS/
+│       │   ├── FGVAE.py              # VAE model definition with EGNN encoder
+│       │   ├── egnn_clean.py         # EGNN layer implementation (adapted from original source)
+│       │   ├── utils.py              # Data handling and utility functions
+│       │   └── create_full_graph_data.py # Graph data preprocessing and visualization
+│       └── configs/
+│           └── test/
+│               └── sim_lr_0.0001_layers_3_kl_min_0.01_latent_dim_64.in
+├── DIHEDRALS/                        # Simpler GVAE for dihedral angles (code exists, pending cleanup and comments)
 ```
-
 
 ## Main Components
 
 ### `fmain.py`
 The main script for configuring, training, and evaluating the VAE models. Parameters are set via a config file.
 
-## `LIBS/`
-A library directory holding implementation of the EGNN layers, VAE architecture, and utility functions for data loading and processing.
-*NOTE*: the "egnn_clean.py" library is taken from https://github.com/vgsatorras/egnn/tree/3c079e7267dad0aa6443813ac1a12425c3717558
- 
-### LIBS/create_full_graph_data.py
+### `LIBS/`
+This directory contains implementations for the EGNN layers, VAE architecture, and utility functions for data loading and processing.
 
-This script is the foundation for converting MD simulation data (GROMACS .tpr/.xtc) into a dataset of molecular graphs suitable for geometric deep learning:
+> **Note**: The `egnn_clean.py` library is adapted from [EGNN by vgsatorras](https://github.com/vgsatorras/egnn/tree/3c079e7267dad0aa6443813ac1a12425c3717558).
 
-    - TrajectoryDataset class: Loads MD trajectories, selects atoms, computes static features (atom type, charge, etc.), and generates edge indices from chemical bonds.
-    - Automatic batching: Processes every frame of the trajectory into a graph object (PyTorch Geometric).
-    - Visualization: Includes functions for 2D/3D graph plotting with per-atom coloring, saving images for reports or debugging.
-    - Extensible feature engineering: Allows easy addition of new atomic features.
-    - CLI Example: The file can be run directly to create datasets and plot sample graphs.
+#### `LIBS/create_full_graph_data.py`
 
-### LIBS/utils.py
+This script is essential for converting MD simulation data (GROMACS `.tpr`/`.xtc`) into datasets of molecular graphs suitable for geometric deep learning:
 
-A companion module providing essential utilities for downstream modeling:
+- **TrajectoryDataset class**: Loads MD trajectories, selects atoms, computes static features (atom type, charge, etc.), and generates edge indices based on chemical bonds.
+- **Automatic batching**: Processes each trajectory frame into a PyTorch Geometric graph object.
+- **Visualization**: Functions for 2D/3D graph plotting with per-atom coloring, useful for reports or debugging.
+- **Extensible feature engineering**: Easily add new atomic features.
+- **CLI Example**: The script can be run directly to create datasets and plot sample graphs.
 
-    - get_dataset: Loads, preprocesses, scales, and optionally aligns graph datasets; handles one-hot encoding of atom types and feature normalization.
-    - find_rigid_alignment: Implements the Kabsch algorithm for frame alignment (crucial for geometric losses).
-    - get_dataloaders: Automatically splits graph datasets into training/validation/test sets and constructs PyTorch DataLoaders.
-    - parse_config: Reads experiment parameters from config files.
-    - Loss functions: Provides KL-divergence and advanced position reconstruction loss with batch alignment.
-    - Visualization: Includes high-level plotting routines for datasets and model predictions, supporting both 2D and 3D.
+#### `LIBS/utils.py`
 
+A companion module providing essential utilities for modeling:
+
+- `get_dataset`: Loads, preprocesses, scales, and (optionally) aligns graph datasets; handles one-hot encoding of atom types and feature normalization.
+- `find_rigid_alignment`: Implements the Kabsch algorithm for frame alignment (crucial for geometric losses).
+- `get_dataloaders`: Splits datasets into training/validation/test sets and constructs PyTorch DataLoaders.
+- `parse_config`: Reads experiment parameters from configuration files.
+- **Loss functions**: Includes KL-divergence and advanced position reconstruction loss with batch alignment.
+- **Visualization**: High-level plotting routines for datasets and model predictions (2D/3D).
 
 ### `notebook_hybrid.ipynb`
 A Jupyter notebook for experiments and exploratory data analysis, demonstrating the use of the main library components.
@@ -78,6 +78,12 @@ A template configuration file that defines the architecture and training paramet
 ### `single_sim.sh` and `test.sh`
 Shell scripts for automating hyperparameter sweeps and organizing output/logs.
 
+## Data Availability
+
+The molecular dynamics datasets used in this project are generated from GROMACS simulations of tetraaline molecules brought to equilibrium. These simulation trajectories (typically as `.tpr` and `.xtc` files) provide the structural data that is converted into graph representations for model training and evaluation.
+
+If you wish to use your own data, ensure that your MD simulations are compatible with the preprocessing scripts, which expect GROMACS trajectory and topology file formats.
+
 ## Getting Started
 
 ### Prerequisites
@@ -86,33 +92,33 @@ Shell scripts for automating hyperparameter sweeps and organizing output/logs.
 - PyTorch
 - PyTorch Geometric
 - MDAnalysis
-- Other dependencies as required in the code
+- Additional libraries as required by the code
 
-You may need to install additional libraries via `pip` or `conda` as required.
+You may need to install extra dependencies via `pip` or `conda`.
 
 ### Example Usage
 
-1. Clone the repository:
+1. **Clone the repository:**
     ```sh
     git clone https://github.com/clod2000/GenAI-for-peptides.git
     cd GenAI-for-peptides/FULL_ATOM/CODES
     ```
 
-2. Prepare your configuration file, or use the template and modify as needed.
+2. **Prepare your configuration file**, or use the provided template and modify as needed.
 
-3. Run a single experiment:
+3. **Run a single experiment:**
     ```sh
     python fmain.py --config config.template.in
     ```
 
-4. For batch experiments, use the provided shell scripts:
+4. **For batch experiments, use the provided shell scripts:**
     ```sh
     bash single_sim.sh
     ```
 
 ## Current Status
 
-This project is in active development as part of my master's thesis. Expect frequent changes and refactoring as the work progresses.
+This project is under active development as part of my master's thesis. Expect frequent changes and refactoring.
 
 ## Author
 
