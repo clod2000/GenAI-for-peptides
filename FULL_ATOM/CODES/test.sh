@@ -39,7 +39,7 @@ for lr in 0.0001; do
               -e "s/^NUM_DEC_LAYERS = .*/NUM_DEC_LAYERS: ${layers}/" \
               -e "s/^NAME_SIMULATION = .*/NAME_SIMULATION: ${SIM_NAME}/" \
               -e "s/^EPOCHS = .*/EPOCHS: 0/" \
-              -e "s/^KL_MIN = .*/KL_MIN: ${kl_min}/" \
+              -e "s/^MIN_KL = .*/MIN_KL: ${kl_min}/" \
               -e "s/^LATENT_DIM = .*/LATENT_DIM: ${latent_dim}/" \
               -e "s/^NAME_FOLDER = .*/NAME_FOLDER: ${FOLDER}/" \
               -e "s/^ENCODER_POS_PROJECTION_DIM = .*/ENCODER_POS_PROJECTION_DIM: ${pos_proj}/" \
