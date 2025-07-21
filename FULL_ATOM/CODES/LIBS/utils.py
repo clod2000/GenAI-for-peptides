@@ -39,7 +39,8 @@ def get_dataset(root_dir = None,
                 scale_features = True,
                 scale_pos = True,
                 initial_alignment = False,
-                verbose = True
+                verbose = True,
+                return_max_position = False
                  ):
 
     """
@@ -170,6 +171,10 @@ def get_dataset(root_dir = None,
         print(f"Number of nodes in the dataset: {dataset[0].num_nodes}")
         print(f"Number of features in the dataset: {dataset[0].x.shape}")
         print()
+    
+    if return_max_position:
+        if verbose: print(f"Returning max position value: {max_position}")
+        return dataset, max_position
     
     return dataset
 
@@ -479,6 +484,17 @@ def beta_annealer(epochs,beta_start = 0., beta_end = 1., annealing_epochs = 100,
     
     return beta_start + (beta_end - beta_start) * min(1,((epochs-wait_epochs) / annealing_epochs))
 
+# def lambda_annealer(epochs, lambda_start = 0., lambda_end = 1., annealing_epochs = 100, wait_epochs = 10):
+#     """
+#     Compute the lambda value for the current epoch.
+#     If the current epoch is less than the wait_epochs, return the lambda_start value.
+#     Otherwise, linearly interpolate between lambda_start and lambda_end based on the current epoch.
+#     """
+    
+#     if epochs < wait_epochs:
+#         return lambda_start
+    
+#     return lambda_start + (lambda_end - lambda_start) * min(1,((epochs-wait_epochs) / annealing_epochs))
 
 
 

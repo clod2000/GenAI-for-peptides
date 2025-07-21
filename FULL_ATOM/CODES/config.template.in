@@ -13,8 +13,9 @@
 # Defines the overall VAE architecture. Can be 'original' or 'hybrid_displacement'.
 # 'original': The initial implementation.
 # 'hybrid_displacement': The new model that uses an explicit encoder and a displacement decoder.
-MODEL_ARCHITECTURE = original 
-#hybrid_displacement
+
+MODEL_ARCHITECTURE = hybrid_displacement
+# original
 
 # If using 'hybrid_displacement', this is the dimension for the flattened coordinate projection.
 ENCODER_POS_PROJECTION_DIM = 64
@@ -31,16 +32,16 @@ ENCODER_POS_PROJECTION_DIM = 64
 ENCODER_TYPE = standard
 HIDDEN_ENCODER_CHANNELS = 256
 OUT_ENCODER_CHANNELS = 128 
-NUM_ENC_LAYERS = 5
+NUM_ENC_LAYERS = 9
 ATTENTION_ENCODER = True
-LATENT_DIM = 128
+LATENT_DIM = 64
 TANH_ENCODER =  False
 NORMALIZE_ENCODER = False
 
 # decoder
 MLP_DECODER_POS_SIZE = [256,256,128]
 HIDDEN_DECODER_CHANNELS = 256
-NUM_DEC_LAYERS = 5
+NUM_DEC_LAYERS = 9
 ATTENTION_DECODER = True
 TANH_DECODER = False
 NORMALIZE_DECODER =  False
@@ -52,32 +53,43 @@ SCALE_POSITIONS = True
 INITIAL_ALIGNMENT = False
 
 #### training parameters
-EPOCHS = 30
+EPOCHS = 100
 BATCHSIZE =  64
-LEARNING_RATE =  1E-4
+LEARNING_RATE =  1E-5
 WEIGHT_DECAY = 0 
 
 #### Scheduler parameters
-USE_SCHEDULER =  True
+USE_SCHEDULER =  False
 SCHEDULER_PATIENCE =  10
 SCHEDULER_FACTOR = 0.5
 SCHEDULER_TYPE = ReduceLROnPlateau
 SCHEDULER_THRESHOLD =  0.0001
 
 # Beta annealing parameters
-BETA = None
+BETA = 0.000001
 wait_epochs =  10
 annealing_epochs = 100
 beta_min = 0.00001
 beta_max = 0.01
 
+# force field parameters
+USE_FORCE_FIELD = False
+PDB_FOR_ENERGY = ../DATA/raw/protein_only.pdb
+LAMBDA_ENERGY =  0.000001
+wait_lambda_epochs = 10
+lambda_annealing_epochs = 50
+lambda_min = 1 
+lambda_max = 1
+
+
+
 # Other parameters
-DISABLE_TQDM = True
+DISABLE_TQDM = False
 SEED =  42
-NAME_SIMULATION = sim_noriginal
-NAME_FOLDER = original_notebook
+NAME_SIMULATION = log_energy_
+NAME_FOLDER = PINN-test
 CONTINUE_FROM = None
 STARTING_EPOCH = 0
-ALIGN_RECONS_LOSS = True
+ALIGN_RECONS_LOSS = False
 TEST_MODEL = True
-MIN_KL = 0.001
+MIN_KL = 3

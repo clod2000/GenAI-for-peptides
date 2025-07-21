@@ -24,6 +24,8 @@ from sklearn.preprocessing import StandardScaler
 from torch_geometric.nn import summary, VGAE
 from tqdm import tqdm
 import sys
+import argparse 
+
 
 from torch.optim.lr_scheduler import CosineAnnealingLR, StepLR, ReduceLROnPlateau
 
@@ -31,7 +33,11 @@ sys.path.append("LIBS")
 from LIBS.utils import *
 from LIBS.FGVAE import *
 
-import argparse 
+print ("Importing force field module...")
+from LIBS.force_field import *
+print("Force field module imported successfully.")
+
+
 # Create a single parser with both arguments
 parser = argparse.ArgumentParser(description='Full Graph VAE with EGNN')
 parser.add_argument('--config', type=str, default='config.template.in', help='Path to the configuration file')
@@ -42,7 +48,7 @@ args = parser.parse_args()
 config_file = args.config
 verbose = args.verbose
 
-verbose= True  # set to debug for now, will be set to False in the future
+#verbose= True  # set to debug for now, will be set to False in the future
 
 #Set the device
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -110,6 +116,15 @@ annealing_epochs = config.get('annealing_epochs', 50)
 beta_min = config.get('beta_min', 0.00001)
 beta_max = config.get('beta_max', 0.0001)
 
+# force field parameters
+USE_FORCE_FIELD = config.get('USE_FORCE_FIELD', True) # if True, the force field is used to calculate the energy of the system
+PDB_FOR_ENERGY = config.get('PDB_FOR_ENERGY', '../DATA/raw/protein_only.pdb') # path to the PDB file for energy calculation
+LAMBDA_ENERGY = config.get('LAMBDA_ENERGY', None) # weight for the energy loss in the total loss function
+wait_lambda_epochs = config.get('wait_lambda_epochs', 10) # number of epochs to wait before starting to use the force field in the loss function
+lambda_annealing_epochs = config.get('lambda_annealing_epochs', 50) # number of epochs to anneal the lambda parameter
+lambda_min = config.get('lambda_min', 1e-15) # minimum value for the lambda parameter
+lambda_max = config.get('lambda_max', 0.001) # maximum value for the lambda parameter
+
 # Other parameters
 DISABLE_TQDM = config.get('DISABLE_TQDM', False) # if True, the tqdm progress bar is disabled
 SEED = config.get('SEED', 42) # seed for reproducibility
@@ -129,19 +144,34 @@ else:
     if verbose: print(f"Continuing training from {CONTINUE_FROM} at epoch {STARTING_EPOCH}")
     if not os.path.exists(CONTINUE_FROM):
         raise FileNotFoundError(f"The path {CONTINUE_FROM} does not exist. Please check the path and try again.")
+    
 
 # Set the random seed for reproducibility
 np.random.seed(SEED)
 torch.manual_seed(SEED)
 
+
 # Create dataset and dataloaders
-dataset = get_dataset(
+
+if USE_FORCE_FIELD:
+    # In this case I need to resize the dataset to true positions to compute the force field and the energy
+    dataset, max_positions = get_dataset(
     include_atom_type=INCLUDE_ATOM_TYPE,
     scale_features=SCALE_FEATURES,
     scale_pos=SCALE_POSITIONS,
     initial_alignment=INITIAL_ALIGNMENT,
-    verbose=verbose
-)
+    verbose=verbose,
+    return_max_position=True
+    )
+    max_positions = max_positions.to(device)  # Move max_positions to the device
+else:
+    dataset = get_dataset(
+        include_atom_type=INCLUDE_ATOM_TYPE,
+        scale_features=SCALE_FEATURES,
+        scale_pos=SCALE_POSITIONS,
+        initial_alignment=INITIAL_ALIGNMENT,
+        verbose=verbose
+    )
 train_loader, val_loader, test_loader = get_dataloaders(
     dataset=dataset,
     shuffle=True,
@@ -149,6 +179,16 @@ train_loader, val_loader, test_loader = get_dataloaders(
     batch_size=BATCHSIZE,
     verbose=verbose
 )
+
+# Initialize the force field if needed
+if USE_FORCE_FIELD:
+    if verbose: print("Using force field for energy calculation")
+    if verbose: print(f"Using PDB file for energy calculation: {PDB_FOR_ENERGY}")
+    # Initialize the energy calculator with the PDB file and force field files
+    physics_critic = EnergyCalculator(
+        pdb_file=PDB_FOR_ENERGY,
+    )
+
 
 # Calculate the mean structure if needed 
 pos_ref = None
@@ -195,7 +235,7 @@ model = FGVAE(
         )
     ).to(device)
 
-#if verbose: print_model_summary(model)
+if verbose: print_model_summary(model)
 
 # Create the optimizer
 optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
@@ -249,6 +289,9 @@ writer = SummaryWriter(log_dir=file_path)
 
 lr = LEARNING_RATE
 
+train_force_loss = torch.inf
+
+
 for epoch in range(STARTING_EPOCH, STARTING_EPOCH +EPOCHS):
 
     if USE_SCHEDULER:
@@ -256,10 +299,27 @@ for epoch in range(STARTING_EPOCH, STARTING_EPOCH +EPOCHS):
             print(f"Adjusting learning rate from {lr} to {scheduler.get_last_lr()[0]}")
             lr = scheduler.get_last_lr()[0]
 
+    # annealers
+
     if BETA is not None:
         beta = BETA
     else:
         beta = beta_annealer(epoch,beta_min, beta_max, annealing_epochs,wait_epochs )
+
+    if USE_FORCE_FIELD and LAMBDA_ENERGY is None:
+        
+        if epoch < wait_lambda_epochs:
+            lambda_energy = 0.0
+        else:
+            lambda_energy = beta_annealer(epoch, lambda_min, lambda_max, lambda_annealing_epochs, wait_lambda_epochs)
+
+
+    ##### to be set in a more clean way
+    if train_force_loss is torch.inf:
+        lambda_energy = 0.0
+    else:
+        lambda_energy = 1 # 0.001
+
        
     train_pbar = tqdm(train_loader, disable= DISABLE_TQDM,desc=f"Epoch {epoch+1}/{STARTING_EPOCH+EPOCHS} [Train]", leave=False)
 
@@ -268,6 +328,8 @@ for epoch in range(STARTING_EPOCH, STARTING_EPOCH +EPOCHS):
     train_loss = 0
     train_kl_loss = 0
     train_recon_loss = 0
+    if USE_FORCE_FIELD:
+        train_force_loss = 0
 
     for data in train_pbar:
 
@@ -275,12 +337,12 @@ for epoch in range(STARTING_EPOCH, STARTING_EPOCH +EPOCHS):
         optimizer.zero_grad()
 
 
-
         pos_pred, mean, log_var, batch_vec = model(data, pos_ref=pos_ref)
 
         kl_loss = KL_divergence(mean, log_var)
         recon_loss = reconstruction_loss(pos_pred,data.pos,data.batch, align = ALIGN_RECONS_LOSS)
 
+    
         # kl loss is Nan 
         if kl_loss.isnan().any() or recon_loss.isnan().any():
             print(f"Warning: kl_loss or recon_loss is NaN. Aborting the code.")
@@ -290,21 +352,53 @@ for epoch in range(STARTING_EPOCH, STARTING_EPOCH +EPOCHS):
             total_loss = recon_loss
         else:
             total_loss = recon_loss + beta*kl_loss
+        
+        if USE_FORCE_FIELD:
+        
+            rescaled_pred_coords = pos_pred * max_positions
+            energies = [ physics_critic(coords) for coords in rescaled_pred_coords.view(data.num_graphs, -1, 3)]
+
+            # convert energies from kJ/mol to eV
+            loss_physics = torch.stack(energies).mean() / 96.485
+
+            #loss_physics = torch.log10(torch.stack(energies).mean() / 96.485)
+
+
+
+            #print(f"Physics loss: {loss_physics.item()}")
+            if lambda_energy > 0:
+                total_loss += lambda_energy * loss_physics
+
+
         # Clip gradients to avoid exploding gradients
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-
+        
         total_loss.backward()
         optimizer.step()
 
-        if total_loss.item() > 1000:
-            print(f"Warning: total_loss is too high: {total_loss.item()}. Skipping this element for loss computation.")
-            # If the loss is too high, skip this element for loss computation     
-        else:
-            train_loss += total_loss.item()
-            train_kl_loss += kl_loss.item()
-            train_recon_loss += recon_loss.item()
+        train_loss += total_loss.item()
+        train_kl_loss += kl_loss.item()
+        train_recon_loss += recon_loss.item()
+        if USE_FORCE_FIELD:
+            train_force_loss += loss_physics.item()
 
         # Update the progress bar
+        if USE_FORCE_FIELD:
+            train_pbar.set_postfix(
+                loss=total_loss.item(),
+                recon_loss=recon_loss.item(),
+                kl_loss=kl_loss.item(),
+                force_loss=loss_physics.item(),
+                beta=beta,
+                lambda_energy=lambda_energy
+            )
+        else:
+            train_pbar.set_postfix(
+                loss=total_loss.item(),
+                recon_loss=recon_loss.item(),
+                kl_loss=kl_loss.item(),
+                beta=beta
+            )
         train_pbar.set_postfix(
             loss=total_loss.item(),
             recon_loss=recon_loss.item(),
@@ -317,7 +411,13 @@ for epoch in range(STARTING_EPOCH, STARTING_EPOCH +EPOCHS):
     train_loss /= len(train_loader)
     train_kl_loss /= len(train_loader)
     train_recon_loss /= len(train_loader)
-    print(f"Epoch {epoch+1}/{EPOCHS}, Train Loss: {train_loss:.4f}, KL Loss: {train_kl_loss:.4f}, Recon Loss: {train_recon_loss:.4f}")
+
+    if USE_FORCE_FIELD:
+        train_force_loss /= len(train_loader)
+        #train_force_loss = torch.clamp(train_force_loss, max=1E20)  
+        print(f"Epoch {epoch+1}/{EPOCHS}, Train Loss: {train_loss:.4f}, KL Loss: {train_kl_loss:.4f}, Recon Loss: {train_recon_loss:.4f}, Force Loss: {train_force_loss:.4f}")
+    else:   
+        print(f"Epoch {epoch+1}/{EPOCHS}, Train Loss: {train_loss:.4f}, KL Loss: {train_kl_loss:.4f}, Recon Loss: {train_recon_loss:.4f}")
     
     if USE_SCHEDULER: #and epoch > annealing_epochs:
         scheduler.step(train_loss)
@@ -333,8 +433,20 @@ for epoch in range(STARTING_EPOCH, STARTING_EPOCH +EPOCHS):
             kl_loss = KL_divergence(mean, log_var)
             recon_loss = reconstruction_loss(pos_pred,data.pos,data.batch, align = ALIGN_RECONS_LOSS)
 
-        total_loss = recon_loss + beta * kl_loss
-        val_loss += total_loss.item()
+            if USE_FORCE_FIELD:
+                rescaled_pred_coords = pos_pred* max_positions
+                energies = [ physics_critic(coords) for coords in rescaled_pred_coords.view(data.num_graphs, -1, 3)]
+                # convert energies from kJ/mol to eV
+                loss_physics = torch.stack(energies).mean() / 96.485
+                if lambda_energy > 0:
+                    total_loss = recon_loss + beta * kl_loss + lambda_energy * loss_physics
+                else:
+                    total_loss = recon_loss + beta * kl_loss
+                #total_loss = recon_loss + beta * kl_loss + lambda_energy * loss_physics
+                val_loss += total_loss.item()
+            else:        
+                total_loss = recon_loss + beta * kl_loss
+                val_loss += total_loss.item()
 
     val_loss /= len(val_loader)
     print(f"Epoch {epoch+1}/{EPOCHS}, Validation Loss: {val_loss:.4f}")
@@ -344,6 +456,9 @@ for epoch in range(STARTING_EPOCH, STARTING_EPOCH +EPOCHS):
     writer.add_scalar('Loss/val', val_loss, epoch)
     writer.add_scalar('Loss/KL', train_kl_loss, epoch)
     writer.add_scalar('Loss/Reconstruction', train_recon_loss, epoch)
+    if USE_FORCE_FIELD:
+        writer.add_scalar('Loss/Physics', train_force_loss, epoch)
+        writer.add_scalar('Lambda', lambda_energy, epoch)
     writer.add_scalar('Beta', beta, epoch)
     if USE_SCHEDULER:
         writer.add_scalar('Learning Rate', scheduler.get_last_lr()[0], epoch)
@@ -351,12 +466,12 @@ for epoch in range(STARTING_EPOCH, STARTING_EPOCH +EPOCHS):
         writer.add_scalar('Learning Rate', LEARNING_RATE, epoch)
 
     # save the model every 30 epochs
-    if (epoch + 1) % 30 == 0 or epoch == EPOCHS - 1:
+    if (epoch + 1) % 10 == 0 or epoch == EPOCHS - 1:
         torch.save(model.state_dict(), file_path + f'model_epoch_{epoch+1}.pth')
         if verbose: print(f"Model saved to {file_path}model_epoch_{epoch+1}.pth")
 
 
-    if (epoch + 1) % 10 == 0 or epoch == EPOCHS - 1:
+    if (epoch + 1) % 5 == 0 or epoch == EPOCHS - 1:
 
         if TEST_MODEL:
             #################################### Test the model ########################################
@@ -369,6 +484,7 @@ for epoch in range(STARTING_EPOCH, STARTING_EPOCH +EPOCHS):
             pred_pos_list = []
             true_pos_list = []
             recon_loss_list = []
+            force_loss_list = []
 
             for data in test_loader:
                 data = data.to(device)
@@ -378,25 +494,39 @@ for epoch in range(STARTING_EPOCH, STARTING_EPOCH +EPOCHS):
                     kl_loss = KL_divergence(mean, log_var)
                     recon_loss = reconstruction_loss(pos_pred, data.pos, data.batch, align=ALIGN_RECONS_LOSS)
                     total_loss = recon_loss + beta * kl_loss
-
+                    if USE_FORCE_FIELD:
+                        rescaled_pred_coords = pos_pred* max_positions
+                        energies = [ physics_critic(coords) for coords in rescaled_pred_coords.view(data.num_graphs, -1, 3)]
+                        # convert energies from kJ/mol to eV
+                        loss_physics = torch.stack(energies).mean() / 96.485
+                        if lambda_energy > 0:
+                            total_loss += lambda_energy * loss_physics
+                        
                     pred_pos_list.append(pos_pred.detach().cpu().numpy())
                     true_pos_list.append(data.pos.detach().cpu().numpy())
+                    if USE_FORCE_FIELD:
+                        force_loss_list.append(loss_physics.item())
+                    else:
+                        force_loss_list.append(0.0)
                     recon_loss_list.append(recon_loss.item())
 
-            # Plot the loss
-            plt.figure(figsize=(10, 5))
-            plt.plot(recon_loss_list, label='Reconstruction Loss')
-            plt.hlines(y=np.mean(recon_loss_list), xmin=0, xmax=len(recon_loss_list), color='r', linestyle='--', label='Mean Loss')
-            plt.xlabel('Batch')
-            plt.ylabel('Loss')
-            plt.title('Reconstruction Loss for Test Set')
-            plt.legend()
+            # # Plot the loss
+            # plt.figure(figsize=(10, 5))
+            # plt.plot(recon_loss_list, label='Reconstruction Loss')
+            # plt.hlines(y=np.mean(recon_loss_list), xmin=0, xmax=len(recon_loss_list), color='r', linestyle='--', label='Mean Loss')
+            # plt.xlabel('Batch')
+            # plt.ylabel('Loss')
+            # plt.title('Reconstruction Loss for Test Set')
+            # plt.legend()
 
-            file_path = file_path if file_path.endswith('/') else file_path + '/'
-            plt.savefig(file_path + 'recon_loss.png')
+            # file_path = file_path if file_path.endswith('/') else file_path + '/'
+            # plt.savefig(file_path + 'recon_loss.png')
 
             # Extract the best reconstruction loss and corresponding predictions
-            best_recon_index = np.argmin(recon_loss_list)
+            if USE_FORCE_FIELD:
+                best_recon_index = np.argmin(force_loss_list)
+            else:
+                best_recon_index = np.argmin(recon_loss_list)
         
             best_coords_pred = pred_pos_list[best_recon_index]
             best_coords_true = true_pos_list[best_recon_index]
@@ -422,7 +552,10 @@ for epoch in range(STARTING_EPOCH, STARTING_EPOCH +EPOCHS):
             ax.set_xlabel('X Coordinate')
             ax.set_ylabel('Y Coordinate')
             ax.set_zlabel('Z Coordinate')
-            ax.text2D(0.05, 0.95, f'(aligned) MSE: {np.round(float(aligned_mse.item()),4)}', transform=ax.transAxes, fontsize=12, verticalalignment='top')
+            if USE_FORCE_FIELD:
+                ax.text2D(0.05, 0.95, f'(aligned) MSE: {np.round(float(aligned_mse),4)}, Force Loss: {np.round(float(force_loss_list[best_recon_index]),4)}', transform=ax.transAxes, fontsize=12, verticalalignment='top')
+            else:
+                ax.text2D(0.05, 0.95, f'(aligned) MSE: {np.round(float(aligned_mse.item()),4)}', transform=ax.transAxes, fontsize=12, verticalalignment='top')
             ax.set_title('True vs Aligned Predicted Coordinates for Best Reconstruction')
             plt.legend()
             # Save the figure
