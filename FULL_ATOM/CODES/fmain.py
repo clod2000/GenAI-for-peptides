@@ -69,6 +69,14 @@ if verbose: print(f"Configuration parameters: {config}")
 #exit()
 
 
+# EXTRA PARAMETERS NOT IN THE CONFIG FILE
+advanced_recon_loss = True
+
+
+
+
+# PARAMETERS IN THE CONFIG FILE
+
 # Architecture parameters
 MODEL_ARCHITECTURE = config.get('MODEL_ARCHITECTURE', 'original') # architecture of the model, can be 'original' or 'hybrid_displacement'
 ENCODER_POS_PROJECTION_DIM = config.get('ENCODER_POS_PROJECTION_DIM', 64) # dimension of the position projection in the encoder, used to project the positions to a lower dimension if 'hybrid_displacement' is used
@@ -151,9 +159,11 @@ np.random.seed(SEED)
 torch.manual_seed(SEED)
 
 
+#device = torch.device( 'cpu')
+
 # Create dataset and dataloaders
 
-if USE_FORCE_FIELD:
+if USE_FORCE_FIELD and SCALE_POSITIONS:
     # In this case I need to resize the dataset to true positions to compute the force field and the energy
     dataset, max_positions = get_dataset(
     include_atom_type=INCLUDE_ATOM_TYPE,
@@ -161,8 +171,13 @@ if USE_FORCE_FIELD:
     scale_pos=SCALE_POSITIONS,
     initial_alignment=INITIAL_ALIGNMENT,
     verbose=verbose,
-    return_max_position=True
+    return_max_position=True,
+    return_pos_angstrom=False
     )
+
+    # we will work in nm instead of rescaling the positions to [0,1], to see if the force field works better with the model
+
+
     max_positions = max_positions.to(device)  # Move max_positions to the device
 else:
     dataset = get_dataset(
@@ -186,7 +201,8 @@ if USE_FORCE_FIELD:
     if verbose: print(f"Using PDB file for energy calculation: {PDB_FOR_ENERGY}")
     # Initialize the energy calculator with the PDB file and force field files
     physics_critic = EnergyCalculator(
-        pdb_file=PDB_FOR_ENERGY,
+        pdb_file=PDB_FOR_ENERGY
+        
     )
 
 
@@ -236,6 +252,13 @@ model = FGVAE(
     ).to(device)
 
 if verbose: print_model_summary(model)
+
+if CONTINUE_FROM is not None:
+    if verbose: print(f"Loading model from {CONTINUE_FROM}")
+    if not os.path.exists(CONTINUE_FROM):
+        raise FileNotFoundError(f"The path {CONTINUE_FROM} does not exist. Please check the path and try again.")
+    model.load_state_dict(torch.load(CONTINUE_FROM, map_location=device))
+    if verbose: print("Model loaded successfully.")
 
 # Create the optimizer
 optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
@@ -315,10 +338,10 @@ for epoch in range(STARTING_EPOCH, STARTING_EPOCH +EPOCHS):
 
 
     ##### to be set in a more clean way
-    if train_force_loss is torch.inf:
+    if train_force_loss is torch.inf and LAMBDA_ENERGY is None:
         lambda_energy = 0.0
     else:
-        lambda_energy = 1 # 0.001
+      lambda_energy = LAMBDA_ENERGY if LAMBDA_ENERGY is not None else lambda_energy
 
        
     train_pbar = tqdm(train_loader, disable= DISABLE_TQDM,desc=f"Epoch {epoch+1}/{STARTING_EPOCH+EPOCHS} [Train]", leave=False)
@@ -340,10 +363,12 @@ for epoch in range(STARTING_EPOCH, STARTING_EPOCH +EPOCHS):
         pos_pred, mean, log_var, batch_vec = model(data, pos_ref=pos_ref)
 
         kl_loss = KL_divergence(mean, log_var)
-        recon_loss = reconstruction_loss(pos_pred,data.pos,data.batch, align = ALIGN_RECONS_LOSS)
+        if advanced_recon_loss:
+            recon_loss = advanced_reconstruction_loss(pos_pred, data.pos, data.edge_index, data.batch, align_coords=ALIGN_RECONS_LOSS) 
+        else:
+            recon_loss = reconstruction_loss(pos_pred,data.pos,data.edge_index, data.batch, align=ALIGN_RECONS_LOSS)
 
-    
-        # kl loss is Nan 
+        # kl loss is Nan
         if kl_loss.isnan().any() or recon_loss.isnan().any():
             print(f"Warning: kl_loss or recon_loss is NaN. Aborting the code.")
             sys.exit(1)
@@ -353,21 +378,35 @@ for epoch in range(STARTING_EPOCH, STARTING_EPOCH +EPOCHS):
         else:
             total_loss = recon_loss + beta*kl_loss
         
-        if USE_FORCE_FIELD:
-        
-            rescaled_pred_coords = pos_pred * max_positions
-            energies = [ physics_critic(coords) for coords in rescaled_pred_coords.view(data.num_graphs, -1, 3)]
+        if USE_FORCE_FIELD and lambda_energy > 0: 
+            if SCALE_POSITIONS:
+                rescaled_pred_coords = pos_pred * max_positions
+                #print(f"rescaled_pred_coord: {rescaled_pred_coords}")
+            else:
+                rescaled_pred_coords = pos_pred
+            # Calculate differentiable physics loss
+            try:
+                physics_loss_val = physics_loss(physics_critic, rescaled_pred_coords, data.batch)
+                weighted_physics = lambda_energy * physics_loss_val
+                total_loss += weighted_physics
+            except Exception as e:
+                print(f"Skipping physics loss due to error: {e}")
 
-            # convert energies from kJ/mol to eV
-            loss_physics = torch.stack(energies).mean() / 96.485
+
+
+
+            # energies = [ physics_critic(coords) for coords in rescaled_pred_coords.view(data.num_graphs, -1, 3)]
+
+            # # convert energies from kJ/mol to eV
+            # loss_physics = torch.stack(energies).mean() / 96.485
 
             #loss_physics = torch.log10(torch.stack(energies).mean() / 96.485)
 
 
 
             #print(f"Physics loss: {loss_physics.item()}")
-            if lambda_energy > 0:
-                total_loss += lambda_energy * loss_physics
+            # if lambda_energy > 0:
+            #     total_loss += lambda_energy * loss_physics
 
 
         # Clip gradients to avoid exploding gradients
@@ -379,16 +418,16 @@ for epoch in range(STARTING_EPOCH, STARTING_EPOCH +EPOCHS):
         train_loss += total_loss.item()
         train_kl_loss += kl_loss.item()
         train_recon_loss += recon_loss.item()
-        if USE_FORCE_FIELD:
-            train_force_loss += loss_physics.item()
+        if USE_FORCE_FIELD and lambda_energy > 0:
+            train_force_loss += physics_loss_val #.item()
 
         # Update the progress bar
-        if USE_FORCE_FIELD:
+        if USE_FORCE_FIELD and lambda_energy > 0:
             train_pbar.set_postfix(
                 loss=total_loss.item(),
                 recon_loss=recon_loss.item(),
                 kl_loss=kl_loss.item(),
-                force_loss=loss_physics.item(),
+                force_loss=physics_loss_val.item(),
                 beta=beta,
                 lambda_energy=lambda_energy
             )
@@ -399,11 +438,11 @@ for epoch in range(STARTING_EPOCH, STARTING_EPOCH +EPOCHS):
                 kl_loss=kl_loss.item(),
                 beta=beta
             )
-        train_pbar.set_postfix(
-            loss=total_loss.item(),
-            recon_loss=recon_loss.item(),
-            kl_loss=kl_loss.item(),
-        )
+        # train_pbar.set_postfix(
+        #     loss=total_loss.item(),
+        #     recon_loss=recon_loss.item(),
+        #     kl_loss=kl_loss.item(),
+        # )
         train_pbar.update(1)
     # Close the progress bar
     train_pbar.close()
@@ -431,13 +470,19 @@ for epoch in range(STARTING_EPOCH, STARTING_EPOCH +EPOCHS):
             data = data.to(device)
             pos_pred, mean, log_var, batch_vec = model(data, pos_ref=pos_ref)
             kl_loss = KL_divergence(mean, log_var)
-            recon_loss = reconstruction_loss(pos_pred,data.pos,data.batch, align = ALIGN_RECONS_LOSS)
+            if advanced_recon_loss:
+                recon_loss = advanced_reconstruction_loss(pos_pred, data.pos, data.edge_index, data.batch, align_coords=ALIGN_RECONS_LOSS) 
+            else:
+                recon_loss = reconstruction_loss(pos_pred, data.pos, data.edge_index, data.batch, align=ALIGN_RECONS_LOSS)
 
             if USE_FORCE_FIELD:
-                rescaled_pred_coords = pos_pred* max_positions
-                energies = [ physics_critic(coords) for coords in rescaled_pred_coords.view(data.num_graphs, -1, 3)]
+                if SCALE_POSITIONS:
+                    rescaled_pred_coords = pos_pred * max_positions 
+                else:
+                    rescaled_pred_coords = pos_pred
+                energies = [ physics_critic.openMM_energy(coords) for coords in rescaled_pred_coords.view(data.num_graphs, -1, 3)]
                 # convert energies from kJ/mol to eV
-                loss_physics = torch.stack(energies).mean() / 96.485
+                loss_physics = torch.stack(energies).mean() #/ 96.485
                 if lambda_energy > 0:
                     total_loss = recon_loss + beta * kl_loss + lambda_energy * loss_physics
                 else:
@@ -495,10 +540,13 @@ for epoch in range(STARTING_EPOCH, STARTING_EPOCH +EPOCHS):
                     recon_loss = reconstruction_loss(pos_pred, data.pos, data.batch, align=ALIGN_RECONS_LOSS)
                     total_loss = recon_loss + beta * kl_loss
                     if USE_FORCE_FIELD:
-                        rescaled_pred_coords = pos_pred* max_positions
-                        energies = [ physics_critic(coords) for coords in rescaled_pred_coords.view(data.num_graphs, -1, 3)]
+                        if SCALE_POSITIONS:
+                            rescaled_pred_coords = pos_pred * max_positions
+                        else:
+                            rescaled_pred_coords = pos_pred
+                        energies = [ physics_critic.openMM_energy(coords) for coords in rescaled_pred_coords.view(data.num_graphs, -1, 3)]
                         # convert energies from kJ/mol to eV
-                        loss_physics = torch.stack(energies).mean() / 96.485
+                        loss_physics = torch.stack(energies).mean()  # / 96.485
                         if lambda_energy > 0:
                             total_loss += lambda_energy * loss_physics
                         

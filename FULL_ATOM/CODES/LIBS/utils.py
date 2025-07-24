@@ -40,7 +40,8 @@ def get_dataset(root_dir = None,
                 scale_pos = True,
                 initial_alignment = False,
                 verbose = True,
-                return_max_position = False
+                return_max_position = False,
+                return_pos_angstrom = True
                  ):
 
     """
@@ -62,14 +63,24 @@ def get_dataset(root_dir = None,
         scale_pos (bool): Whether to scale the positions to a maximum value of 1.
         initial_alignment (bool): Whether to align the first frame to the origin and all other frames to the first frame.
         verbose (bool): Whether to print verbose output during processing.
-    Returns:
+        return_max_position (bool): Whether to return the maximum position value used for scaling.
+        return_pos_angstrom (bool): Whether the positions should be returned in Angstroms (True) or nm (False).
         dataset (InMemoryDataset): The processed dataset containing the atomic positions and features.
     """ 
 
     
     if verbose: print("Loading dataset ...")
-    if verbose: print()
-    
+    if verbose: print(f"Root directory: {root_dir}")
+    if verbose: print(f"TPR file: {tpr_file}")
+    if verbose: print(f"Trajectory file: {trajectory}")
+    if verbose: print(f"Selection: {selection}")
+    if verbose: print(f"Include atom type: {include_atom_type}")
+    if verbose: print(f"Scale features: {scale_features}")
+    if verbose: print(f"Scale positions: {scale_pos}")
+    if verbose: print(f"Initial alignment: {initial_alignment}")
+    if verbose: print(f"Return max position: {return_max_position}")
+    if verbose: print(f"Return position in Angstrom: {return_pos_angstrom}")
+
     if root_dir is None:
         if verbose: print("No root directory provided, using default path ...")
         root_dir = osp.join(osp.dirname(__file__), '..', '..','DATA',)
@@ -87,6 +98,13 @@ def get_dataset(root_dir = None,
 
 
     positions = dataset.pos
+
+    if  not return_pos_angstrom:
+        if verbose: print("Converting positions to nm ...")
+        # Convert positions from Angstroms to nm
+        positions = positions / 10.0
+    else:
+        if verbose: print("Positions are already in Angstroms, no conversion needed ...")
     
     # Get the maximum value of position for scaling
     if scale_pos:
@@ -117,11 +135,12 @@ def get_dataset(root_dir = None,
         # Step 3: One-hot encode
         one_hot_encoded = F.one_hot(indexed_column, num_classes=num_classes).float()
 
-        features = torch.cat((one_hot_encoded,features[:,1:]),dim=1)
+        if not scale_features:
+            features = torch.cat((one_hot_encoded,features[:,1:]),dim=1)
     
     else:
         if verbose: print("Not including atom features, discarding it ...")
-        features = features[:,1:]
+        features = features[:,1:] # Discard it anyway because if include_atom_type the next step will add it again
 
     if scale_features:
 
@@ -129,8 +148,11 @@ def get_dataset(root_dir = None,
 
         # Scale the features to have zero mean and unit variance
         scaler = StandardScaler()
-        scaled_features = scaler.fit_transform(features.numpy())
+        scaled_features = scaler.fit_transform(features[:,1:].numpy())
         features = torch.tensor(scaled_features, dtype=torch.float32)
+        if include_atom_type:
+            # If atom type is included, concatenate the one-hot encoded features
+            features = torch.cat((one_hot_encoded, torch.tensor(scaled_features, dtype=torch.float32)), dim=1)
 
 
     new_dataset = [] # will hold the new dataset
@@ -433,6 +455,97 @@ def reconstruction_loss(pos_pred, pos_true, batch, align=True):
 
     # Average loss over the graphs in the batch
     return total_loss / num_graphs if num_graphs > 0 else torch.tensor(0.0, device=pos_pred.device)
+
+
+
+## More advanced loss functions that preserve molecular geometry better than simple MSE
+
+def coordinate_loss(pos_pred, pos_true, batch, align=True):
+    """
+    Standard coordinate-wise loss with optional alignment
+    """
+    if not align:
+        return F.mse_loss(pos_pred, pos_true)
+    
+    total_loss = 0.0
+    num_graphs = batch.max().item() + 1
+    
+    for i in range(num_graphs):
+        mask = (batch == i)
+        pos_pred_i = pos_pred[mask]
+        pos_true_i = pos_true[mask]
+        
+        # Align predicted to true
+        R, t = find_rigid_alignment(pos_pred_i, pos_true_i)
+        pos_pred_aligned = (R @ pos_pred_i.T).T + t
+        
+        # Calculate MSE after alignment
+        graph_loss = F.mse_loss(pos_pred_aligned, pos_true_i)
+        total_loss += graph_loss
+    
+    return total_loss / num_graphs
+
+def distance_matrix_loss(pos_pred, pos_true, batch):
+    """
+    Distance matrix loss - inherently alignment-invariant
+    No explicit alignment needed
+    """
+    total_loss = 0.0
+    num_graphs = batch.max().item() + 1
+    
+    for i in range(num_graphs):
+        mask = (batch == i)
+        pos_pred_i = pos_pred[mask]
+        pos_true_i = pos_true[mask]
+        
+        # Calculate pairwise distances - invariant to rotation/translation
+        d_pred = torch.cdist(pos_pred_i, pos_pred_i)
+        d_true = torch.cdist(pos_true_i, pos_true_i)
+        
+        # Upper triangular part only (avoid redundancy)
+        triu_indices = torch.triu_indices(d_pred.size(0), d_pred.size(0), offset=1)
+        d_pred_triu = d_pred[triu_indices[0], triu_indices[1]]
+        d_true_triu = d_true[triu_indices[0], triu_indices[1]]
+        
+        graph_loss = F.mse_loss(d_pred_triu, d_true_triu)
+        total_loss += graph_loss
+        
+    return total_loss / num_graphs
+
+def bond_angle_loss(pos_pred, pos_true, edge_index):
+    """
+    Bond and angle loss - inherently alignment-invariant
+    No explicit alignment needed
+    """
+    # Bond length component - invariant to rotation/translation
+    sender, receiver = edge_index
+    true_bonds = pos_true[sender] - pos_true[receiver]
+    pred_bonds = pos_pred[sender] - pos_pred[receiver]
+    true_lengths = torch.norm(true_bonds, dim=1)
+    pred_lengths = torch.norm(pred_bonds, dim=1)
+    bond_loss = F.mse_loss(pred_lengths, true_lengths)
+    
+    # Bond angle component - also invariant to rotation/translation
+    # [Implementation as before]
+    
+    return bond_loss  # + angle_loss
+
+def advanced_reconstruction_loss(pos_pred, pos_true, edge_index, batch, align_coords=True):
+    """
+    Comprehensive loss function that properly handles alignment requirements
+    """
+    # 1. Coordinate loss - needs explicit alignment if requested
+    coord_loss = coordinate_loss(pos_pred, pos_true, batch, align=align_coords)
+    
+    # 2. Distance matrix loss - inherently alignment-invariant
+    dist_loss = distance_matrix_loss(pos_pred, pos_true, batch)
+    
+    # 3. Bond/angle loss - inherently alignment-invariant
+    structure_loss = bond_angle_loss(pos_pred, pos_true, edge_index)
+    
+    # Combine with weights
+    return 0.2 * coord_loss + 0.5 * dist_loss + 0.3 * structure_loss
+
 
 
 

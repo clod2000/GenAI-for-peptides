@@ -31,8 +31,8 @@ ENCODER_POS_PROJECTION_DIM = 64
 # encoder
 ENCODER_TYPE = standard
 HIDDEN_ENCODER_CHANNELS = 256
-OUT_ENCODER_CHANNELS = 128 
-NUM_ENC_LAYERS = 9
+OUT_ENCODER_CHANNELS = 64 
+NUM_ENC_LAYERS = 12
 ATTENTION_ENCODER = True
 LATENT_DIM = 64
 TANH_ENCODER =  False
@@ -41,7 +41,7 @@ NORMALIZE_ENCODER = False
 # decoder
 MLP_DECODER_POS_SIZE = [256,256,128]
 HIDDEN_DECODER_CHANNELS = 256
-NUM_DEC_LAYERS = 9
+NUM_DEC_LAYERS = 12
 ATTENTION_DECODER = True
 TANH_DECODER = False
 NORMALIZE_DECODER =  False
@@ -49,12 +49,12 @@ NORMALIZE_DECODER =  False
 #### dataset parameters
 INCLUDE_ATOM_TYPE = True
 SCALE_FEATURES = True
-SCALE_POSITIONS = True
+SCALE_POSITIONS = False
 INITIAL_ALIGNMENT = False
 
 #### training parameters
 EPOCHS = 100
-BATCHSIZE =  64
+BATCHSIZE =  128
 LEARNING_RATE =  1E-5
 WEIGHT_DECAY = 0 
 
@@ -66,30 +66,30 @@ SCHEDULER_TYPE = ReduceLROnPlateau
 SCHEDULER_THRESHOLD =  0.0001
 
 # Beta annealing parameters
-BETA = 0.000001
+BETA = None
 wait_epochs =  10
 annealing_epochs = 100
 beta_min = 0.00001
 beta_max = 0.01
 
 # force field parameters
-USE_FORCE_FIELD = False
+USE_FORCE_FIELD = True
 PDB_FOR_ENERGY = ../DATA/raw/protein_only.pdb
-LAMBDA_ENERGY =  0.000001
-wait_lambda_epochs = 10
-lambda_annealing_epochs = 50
-lambda_min = 1 
-lambda_max = 1
+LAMBDA_ENERGY =  None
+wait_lambda_epochs = 0
+lambda_annealing_epochs = 500
+lambda_min = 1e-20
+lambda_max = 0.00001
 
 
 
 # Other parameters
 DISABLE_TQDM = False
 SEED =  42
-NAME_SIMULATION = log_energy_
-NAME_FOLDER = PINN-test
+NAME_SIMULATION = pos_nm
+NAME_FOLDER = new_diff_PINN
 CONTINUE_FROM = None
 STARTING_EPOCH = 0
-ALIGN_RECONS_LOSS = False
+ALIGN_RECONS_LOSS = True
 TEST_MODEL = True
-MIN_KL = 3
+MIN_KL = 1.

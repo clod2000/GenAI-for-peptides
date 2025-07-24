@@ -7,12 +7,12 @@
 CONFIG_TEMPLATE="config.template.in"
 
 # define the folder name
-FOLDER="no_alignment"
+FOLDER="new_recon_loss"
 
 
 # 1. Create a descriptive name for this specific run
 # This is CRITICAL for organizing your output files and logs
-SIM_NAME="sim_no_alignment"
+SIM_NAME="PINN"
 #SIM_NAME="${SIM_NAME}_lr_${lr}_layers_${layers}_kl_min_${kl_min}"
 echo "--- Starting run: ${SIM_NAME} ---"
 
