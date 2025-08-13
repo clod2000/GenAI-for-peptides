@@ -682,7 +682,7 @@ class EnergyCalculator:
         # Angles already handled above
 
     def __del__(self):
-        # [unchanged: resource cleanup]
+        """Clean up OpenMM resources"""
         if hasattr(self, 'context') and self.context is not None:
             del self.context
         if hasattr(self, 'integrator') and self.integrator is not None:
@@ -706,33 +706,71 @@ class EnergyCalculator:
         energy = 0.5 * k * (lengths - r0) ** 2
         return energy.sum()
 
-    def lennard_jones_energy(self, coords):
+    def lennard_jones_energy(self, coords, cutoff=0.5, exclude_bonded=True):
         """
         Vectorized Lennard-Jones energy calculation
-        coords must be in nm!
+        
+        Args:
+            coords: Tensor of shape [num_atoms, 3] in nm
+            cutoff: Distance cutoff in nm (default 1.0 nm)
+            exclude_bonded: Whether to exclude bonded pairs from LJ calculation
+        
+        Returns:
+            Total Lennard-Jones energy as a scalar tensor
         """
+        if coords.shape[0] < 2:
+            return torch.tensor(0.0, device=coords.device, dtype=coords.dtype)
+        
+        # Move parameters to correct device
         sigma = self.sigma_tensor.to(coords.device)
         epsilon = self.epsilon_tensor.to(coords.device)
         n = coords.shape[0]
-        dists = torch.cdist(coords, coords)
+        
+        # Calculate all pairwise distances
+        dists = torch.cdist(coords, coords)  # [n, n]
+        
+        # Create mask to exclude self-interactions
         mask = ~torch.eye(n, dtype=torch.bool, device=coords.device)
-
-        sigma_i = sigma.unsqueeze(0).expand(n, n)
-        sigma_j = sigma.unsqueeze(1).expand(n, n)
+        
+        # Exclude bonded pairs if requested
+        if exclude_bonded and hasattr(self, 'bond_indices') and self.bond_indices.shape[0] > 0:
+            bond_indices = self.bond_indices.to(coords.device)
+            for i in range(bond_indices.shape[0]):
+                idx1, idx2 = bond_indices[i, 0], bond_indices[i, 1]
+                mask[idx1, idx2] = False
+                mask[idx2, idx1] = False
+        
+        # Apply cutoff mask
+        if cutoff > 0:
+            cutoff_mask = dists <= cutoff
+            mask = mask & cutoff_mask
+        
+        # Compute σ_ij and ε_ij using Lorentz-Berthelot combining rules
+        sigma_i = sigma.unsqueeze(0).expand(n, n)  # [n, n]
+        sigma_j = sigma.unsqueeze(1).expand(n, n)  # [n, n]
         sigma_ij = 0.5 * (sigma_i + sigma_j)
-
+        
         eps_i = epsilon.unsqueeze(0).expand(n, n)
         eps_j = epsilon.unsqueeze(1).expand(n, n)
         eps_ij = torch.sqrt(eps_i * eps_j)
-
-        safe_dists = torch.clamp(dists, min=0.01)
+        
+        # Avoid division by zero and numerical instability
+        safe_dists = torch.clamp(dists, min=0.01)  # Minimum distance 0.01 nm
+        
+        # Calculate LJ potential: E = 4ε[(σ/r)^12 - (σ/r)^6]
         ratio = sigma_ij / safe_dists
         ratio6 = ratio ** 6
         ratio12 = ratio6 ** 2
         E = 4 * eps_ij * (ratio12 - ratio6)
+        
+        # Apply all masks
         E = torch.where(mask, E, torch.zeros_like(E))
+        
+        # Sum upper triangle only to avoid double counting
         energy = torch.triu(E, diagonal=1).sum()
+        
         return energy
+       
 
     def angle_energy(self, coords):
         """
@@ -758,35 +796,51 @@ class EnergyCalculator:
         return energy.sum()
 
     def openMM_energy(self, coords_tensor):
-        # [unchanged: OpenMM energy using context]
+        """
+        Calculate energy using OpenMM (non-differentiable)
+        """
         try:
+            # Convert to numpy for OpenMM
             coords_numpy = coords_tensor.detach().cpu().numpy()
             positions = coords_numpy * unit.nanometer
+            
+            # Calculate energy
             self.context.setPositions(positions)
             state = self.context.getState(getEnergy=True)
             energy = state.getPotentialEnergy().value_in_unit(unit.kilojoules_per_mole)
+            
             return torch.tensor(energy, dtype=torch.float32, device='cpu')
+            
         except Exception as e:
             print(f"Error in OpenMM energy calculation: {e}")
-            return torch.tensor(1e6, dtype=torch.float32, device='cpu')
+            return torch.tensor(1e6, dtype=torch.float32, device='cpu')  # High energy on failure
 
-    def __call__(self, coords_tensor):
+    def __call__(self, coords_tensor,use_bonded=True, use_angle=True, use_lj=True):
         """
         Calculate all energy components in a differentiable way
         Assumes coords_tensor is in nm!
+
+        Args:
+            coords_tensor: Coordinates tensor [num_atoms, 3]
+            use_bonded: Whether to include bonded energy
+            use_angle: Whether to include angle energy
+            use_lj: Whether to include Lennard-Jones energy
+        Returns:
+            Tuple of (bond_energy, angle_energy, lj_energy)
         """
         try:
             device = coords_tensor.device
-            E_bond = self.harmonic_bond_energy(coords_tensor)
-            E_angle = self.angle_energy(coords_tensor)
-            E_lj = self.lennard_jones_energy(coords_tensor)
+            E_bond = self.harmonic_bond_energy(coords_tensor) if use_bonded else 0
+            E_angle = self.angle_energy(coords_tensor) if use_angle else 0
+            E_lj = self.lennard_jones_energy(coords_tensor) if use_lj else 0
             return E_bond, E_angle, E_lj
         except Exception as e:
             print(f"Error in differentiable energy calculation: {e}")
             zero = torch.tensor(0.0, device=coords_tensor.device)
             return zero, zero, zero
 
-def physics_loss(energy_calculator, pos_pred, batch):
+def physics_loss(energy_calculator, pos_pred, batch, use_log =True,
+                  use_bonded=True, use_angle=True, use_lj=True):
     """
     Calculate differentiable physics-based loss
     
@@ -794,6 +848,10 @@ def physics_loss(energy_calculator, pos_pred, batch):
         energy_calculator: EnergyCalculator instance
         pos_pred: Predicted positions [num_atoms, 3]
         batch: Batch indices
+        use_log: Whether to use log scaling on the energy
+        use_bonded: Whether to include bonded energy
+        use_angle: Whether to include angle energy
+        use_lj: Whether to include Lennard-Jones energy
     
     Returns:
         Total physics loss
@@ -809,8 +867,8 @@ def physics_loss(energy_calculator, pos_pred, batch):
         
         try:
             # Calculate energy components
-            bond_energy, angle_energy, lj_energy = energy_calculator(coords)
-            
+            bond_energy, angle_energy, lj_energy = energy_calculator(coords, use_bonded=use_bonded, use_angle=use_angle, use_lj=use_lj)
+
             # Weight the components
             physics_energy = (
                 5.0 * bond_energy + 
@@ -818,8 +876,8 @@ def physics_loss(energy_calculator, pos_pred, batch):
                 0.01 * lj_energy  
             )
             
-            # Add to total
-            total_loss = total_loss + torch.log10(physics_energy + 1)
+           
+            total_loss = total_loss + physics_energy
 
         except Exception as e:
             print(f"Error in physics loss calculation: {e}")
@@ -828,5 +886,7 @@ def physics_loss(energy_calculator, pos_pred, batch):
     # Normalize by number of molecules
     if num_graphs > 0:
         total_loss = total_loss / num_graphs
+    if use_log:
+        total_loss = torch.log10(total_loss )
     
     return total_loss

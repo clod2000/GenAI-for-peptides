@@ -40,6 +40,8 @@ class EGNN_Encoder(nn.Module):
                  num_egnn_layers=4, latent_dim=64, num_nodes = 52,
                  architecture='original', # 'original' or 'hybrid_displacement'
                  pos_projection_dim=64,   # : For the hybrid model
+                 mode = 'standard', # 'standard' or 'denoise' (for denoising autoencoder)
+                 noise_level = 0.1, # For denoising autoencoder
                  edge_dim=None,
                  num_atom_types = None,
                  attention = False, 
@@ -60,6 +62,8 @@ class EGNN_Encoder(nn.Module):
             num_nodes (int): Number of nodes in the graph (set during forward pass).
             architecture (str): Architecture type, either 'original' or 'hybrid_displacement'.
             pos_projection_dim (int): Dimension for position projection in hybrid architecture.
+            mode (str): Mode of operation, either 'standard' or 'denoise'.
+            noise_level (float): Standard deviation of Gaussian noise for denoising autoencoder.
             edge_dim (int, optional): Dimension of edge features if applicable.
             num_atom_types (int, optional): Number of atom types for one-hot encoding.
             attention (bool, optional): Whether to use attention mechanism in EGCL.
@@ -77,6 +81,8 @@ class EGNN_Encoder(nn.Module):
         self.num_nodes = num_nodes # This will be set during the forward pass
         self.architecture = architecture
         self.pos_projection_dim = pos_projection_dim
+        self.mode = mode
+        self.noise_level = noise_level
 
         self.project = nn.Linear(in_channels, hidden_channels_egnn) # Initial projection to hidden channels
 
@@ -147,8 +153,13 @@ class EGNN_Encoder(nn.Module):
         """
         
         h = x # Initial node features
-        p = pos # Initial node positions
-        
+
+        if self.mode == 'denoise':
+            # Add Gaussian noise to the positions for denoising autoencoder
+            p = pos + torch.randn_like(pos) * self.noise_level
+        else:
+            p = pos
+
         h_enc, p_enc = self.egnn(h, p, edges=edge_index, edge_attr = None) 
 
         graph_embedding_h = self.pool(h_enc, batch) 
@@ -234,12 +245,12 @@ class EGNN_Decoder(nn.Module):
             self.map_initial_node = nn.Linear(node_feature_dim_initial , hidden_nf)
             self.initial_pos_MLP = nn.Sequential(
                 nn.Linear(latent_dim + node_feature_dim_initial, pos_MLP_size[0]),
-                nn.ReLU(),
+                nn.LeakyReLU(),
                 nn.Linear(pos_MLP_size[0], pos_MLP_size[1]),
-                nn.ReLU(),
+                nn.LeakyReLU(),
                 nn.Linear(pos_MLP_size[1], pos_MLP_size[2]),
-                nn.ReLU(),
-                nn.Linear(pos_MLP_size[2], out_coord_dim)  # Final output dimension for positions   
+                nn.LeakyReLU(),
+                nn.Linear(pos_MLP_size[2], out_coord_dim)  # Final output dimension for positions
             )
             self.egnn_decoder = EGNN(
                 in_node_nf=hidden_nf, # Input to EGNN layers
@@ -257,7 +268,11 @@ class EGNN_Decoder(nn.Module):
             print(f"Decoder initialized with latent_dim={latent_dim}, node_feature_dim_initial={node_feature_dim_initial}, "
                   f"hidden_nf={hidden_nf}, num_egnn_layers={num_egnn_layers}, out_coord_dim={out_coord_dim}")
             print(f"Architecture: {architecture}")
-            print(f"Initial position MLP sizes: {pos_MLP_size}")
+            if architecture == 'hybrid_displacement':
+                print(f"Latent vector will be projected to hidden dimension: {hidden_nf}")
+            else: # Original architecture
+                print(f"Initial position MLP sizes: {pos_MLP_size}")
+        
             if attention:
                 print("Using attention mechanism in EGNN")
             if tanh:
@@ -293,10 +308,10 @@ class EGNN_Decoder(nn.Module):
                 raise ValueError("pos_ref must be provided for the hybrid_displacement decoder.")
             
             # We expand the single pos_ref to match the batch size.
-            num_graphs_in_batch = batch.max().item() + 1
-            # This assumes pos_ref is for a single graph.
-            pos_ref_expanded = pos_ref.repeat(num_graphs_in_batch, 1)
-
+            # num_graphs_in_batch = batch.max().item() + 1
+            # # This assumes pos_ref is for a single graph.
+            # if pos_ref.dim() == 1:
+            #     pos_ref = pos_ref.repeat(num_graphs_in_batch, 1)
             # 1. Project initial features to the hidden dimension
             h = self.map_initial_node(x_initial_features)
 
@@ -304,7 +319,7 @@ class EGNN_Decoder(nn.Module):
             z_conditioning = z_mapped[batch]
             h_conditioned = h + z_conditioning
 
-            h_decoded, pos_decoded = self.egnn_decoder(h_conditioned, pos_ref_expanded, edge_index, edge_attr=None)
+            h_decoded, pos_decoded = self.egnn_decoder(h_conditioned, pos_ref, edge_index, edge_attr=None)
 
         else: # Original architecture
 
@@ -312,10 +327,11 @@ class EGNN_Decoder(nn.Module):
 
             h = self.map_initial_node(x_initial_features)  # Project to EGNN's input feature dimension
 
+           
             pos_cat = torch.cat([x_initial_features, z_repeated], dim=1) # [N, node_feature_dim_initial + latent_dim]
             # the cat with initial features is to ensure that the initial position are at least slightly different for each node
             latent_pos = self.initial_pos_MLP(pos_cat) # Initial positions from latent vector [N, 3]
-        
+              
             # Check if all positions are identical
             if torch.allclose(latent_pos, latent_pos[0:1].expand_as(latent_pos), atol=1e-6):
                 print("WARNING: All generated positions are identical!")
@@ -388,6 +404,7 @@ class FGVAE(nn.Module):
 
             # Reparameterize
             z = self.reparameterize(mean, log_var)
+            #z = mean
 
             # Decode
             pos_pred = self.decoder(z, x, edge_index, pos_ref=pos_ref, batch=batch)

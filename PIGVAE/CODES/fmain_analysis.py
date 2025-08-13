@@ -25,27 +25,23 @@ from torch_geometric.nn import summary, VGAE
 from tqdm import tqdm
 import sys
 import argparse 
-
-import seaborn as sns
-from sklearn.decomposition import PCA
-import imageio
-
-
 from torch.optim.lr_scheduler import CosineAnnealingLR, StepLR, ReduceLROnPlateau
 
 sys.path.append("LIBS")
-from LIBS.utils import *
-from LIBS.FGVAE import *
+from LIBS.Putils import *
+from LIBS.PIGVAE import *
+from LIBS.PIGVAE_off import *
 
 print ("Importing force field module...")
 from LIBS.force_field import *
+#from LIBS.upgraded_ff import *
 print("Force field module imported successfully.")
 
 
 # Create a single parser with both arguments
 parser = argparse.ArgumentParser(description='Full Graph VAE with EGNN')
 parser.add_argument('--config', type=str, default='config.template.in', help='Path to the configuration file')
-parser.add_argument('--verbose', action='store_true', default=False, help='Enable verbose mode')
+parser.add_argument('--verbose', action='store_true', default=True, help='Enable verbose mode')
 
 # Parse the command line arguments
 args = parser.parse_args()
@@ -74,16 +70,22 @@ if verbose: print(f"Configuration parameters: {config}")
 
 
 # EXTRA PARAMETERS NOT IN THE CONFIG FILE
-
+OFFICIAL_EGNN = True
 
 # PARAMETERS IN THE CONFIG FILE
 
 # Architecture parameters
 MODEL_ARCHITECTURE = config.get('MODEL_ARCHITECTURE', 'original') # architecture of the model, can be 'original' or 'hybrid_displacement'
 ENCODER_POS_PROJECTION_DIM = config.get('ENCODER_POS_PROJECTION_DIM', 64) # dimension of the position projection in the encoder, used to project the positions to a lower dimension if 'hybrid_displacement' is used
+
+# Training parameters
+TRAINING_MODE = config.get('TRAINING_MODE', 'generative') # 'denoising' or 'generative'
+NOISE_LEVEL = config.get('NOISE_LEVEL', 0.1) # e.g., 0.1 nm noise
+
 #### model parameters
 # encoder
-ENCODER_TYPE = config.get('ENCODER_TYPE', 'standard') # type of the encoder, can be 'standard' or TO BE DEFINED
+ENCODER_TYPE = config.get('ENCODER_TYPE', 'standard') # type of the encoder, can be 'standard' or 'denoise' # it acts on the pos 
+NOISE_LV = config.get('NOISE_LV', 0.1) # noise level for the denoising encoder, used to create a noisy version of the positions
 HIDDEN_ENCODER_CHANNELS = config.get('HIDDEN_ENCODER_CHANNELS', 256)
 OUT_ENCODER_CHANNELS = config.get('OUT_ENCODER_CHANNELS', 128)
 NUM_ENC_LAYERS = config.get('NUM_ENC_LAYERS', 5) # number of EGNN layers in the encoder
@@ -109,6 +111,7 @@ INITIAL_ALIGNMENT = config.get('INITIAL_ALIGNMENT', True) # if True, the dataset
 EPOCHS = config.get('EPOCHS', 50)
 BATCHSIZE = config.get('BATCHSIZE', 64)
 LEARNING_RATE = config.get('LEARNING_RATE', 1E-4)
+WARMUP_EPOCHS = config.get('WARMUP_EPOCHS', 0)
 WEIGHT_DECAY = config.get('WEIGHT_DECAY', 0) # weight decay for the optimizer, set to 0 to disable weight decay ( bad idea using it for vae)
 advanced_recon_loss = config.get('advanced_recon_loss', True) # if True, the advanced reconstruction loss is used, otherwise the standard reconstruction loss is used
 return_pos_angstrom = config.get('return_pos_angstrom', False) # if True, the positions are returned in Angstrom, otherwise they are returned in the range [0, 1]
@@ -126,6 +129,7 @@ wait_epochs = config.get('wait_epochs', 0)
 annealing_epochs = config.get('annealing_epochs', 50)
 beta_min = config.get('beta_min', 0.00001)
 beta_max = config.get('beta_max', 0.0001)
+TC_WEIGHT = config.get('TC_WEIGHT', 1) # weight for the TC loss in the total loss function, if None, the TC loss is not used
 
 # force field parameters
 USE_FORCE_FIELD = config.get('USE_FORCE_FIELD', True) # if True, the force field is used to calculate the energy of the system
@@ -176,6 +180,7 @@ if USE_FORCE_FIELD:
     return_pos_angstrom = False  # if using force field, return positions in nm for energy calculation
     print(f"Using force field, returning positions in Angstrom: {return_pos_angstrom}")
 
+max_positions = None # Initialize max_positions
 if SCALE_POSITIONS:
     # In this case I need to resize the dataset to true positions to compute the force field and the energy
     dataset, max_positions = get_dataset(
@@ -187,10 +192,6 @@ if SCALE_POSITIONS:
     return_max_position=True,
     return_pos_angstrom=return_pos_angstrom
     )
-
-    # we will work in nm instead of rescaling the positions to [0,1], to see if the force field works better with the model
-
-
     max_positions = max_positions.to(device)  # Move max_positions to the device
 else:
     dataset = get_dataset(
@@ -201,29 +202,25 @@ else:
         verbose=verbose,
         return_max_position=False,
         return_pos_angstrom=return_pos_angstrom
-
     )
-train_loader, val_loader, test_loader = get_dataloaders(
-    dataset=dataset,
-    shuffle=True,
-    seed=SEED,
-    batch_size=BATCHSIZE,
-    verbose=verbose
-)
+    # Define max_positions for consistency in function calls, even if not used for scaling
+    max_positions = torch.ones(3, device=device)
 
 # Initialize the force field if needed
+physics_critic = None
 if USE_FORCE_FIELD:
     if verbose: print("Using force field for energy calculation")
     if verbose: print(f"Using PDB file for energy calculation: {PDB_FOR_ENERGY}")
     # Initialize the energy calculator with the PDB file and force field files
     physics_critic = EnergyCalculator(
         pdb_file=PDB_FOR_ENERGY
-        
     )
 
-
-
-# Calculate the mean structure if needed 
+    #dataset = add_physics_attributes_to_dataset(dataset, physics_critic)
+    dataset = create_physics_informed_dataset(dataset, physics_critic)
+    if verbose: print(f"Dataset with physics attributes created with {len(dataset)} graphs")
+    
+# Calculate the mean structure if needed
 pos_ref = None
 if MODEL_ARCHITECTURE == 'hybrid_displacement':
     if verbose: print("Calculating mean reference structure for the hybrid model...")
@@ -240,49 +237,63 @@ if MODEL_ARCHITECTURE == 'hybrid_displacement':
     pos_ref = all_pos.mean(dim=0).to(device)  # Shape: (num_atoms, 3)
 
     
-    # Use the dataset directly instead of the DataLoader to avoid batching complications
-    # all_pos = torch.stack([data.pos for data in dataset], dim=0)  # Shape: (num_graphs, num_atoms, 3)
-    # pos_ref = all_pos.mean(dim=0).to(device)  # Shape: (num_atoms, 3)
-
-    ############################################################################################## to be checked #############################
-    #pos_ref = dataset[0].pos  
-    #pos_ref = pos_ref.to(device)  # Move to device
-    
     if verbose: print(f"Reference structure created with shape: {pos_ref.shape}")
     if verbose: print(f"Single graph reference shape: {pos_ref.shape}")
     if verbose: print(f"Used {len(dataset)} graphs to calculate mean structure")
     if verbose: print()
 
 
-# Create the model
-model = FGVAE(
-        encoder=EGNN_Encoder(
+if OFFICIAL_EGNN:
+    if verbose: print("Using official EGNN implementation")
+    model = FGVAE(
+        encoder=Official_EGNN_Encoder(
             in_channels=dataset[0].num_features,
-            hidden_channels_egnn=HIDDEN_ENCODER_CHANNELS,
-            out_channels_egnn=OUT_ENCODER_CHANNELS,
+            hidden_channels=HIDDEN_ENCODER_CHANNELS,
             num_egnn_layers=NUM_ENC_LAYERS,
-            latent_dim=LATENT_DIM,
-            attention=ATTENTION_ENCODER,
-            architecture=MODEL_ARCHITECTURE,
-            pos_projection_dim=ENCODER_POS_PROJECTION_DIM,
-            tanh=TANH_ENCODER,
-            normalize=NORMALIZE_ENCODER,
-            verbose=verbose
+            latent_dim=LATENT_DIM
         ),
-        decoder=EGNN_Decoder(
+        decoder=Official_EGNN_Decoder(
             latent_dim=LATENT_DIM,
             node_feature_dim_initial=dataset[0].num_features,
-            hidden_nf=HIDDEN_DECODER_CHANNELS,
+            hidden_channels=HIDDEN_DECODER_CHANNELS,
             num_egnn_layers=NUM_DEC_LAYERS,
-            attention=ATTENTION_DECODER,
-            architecture=MODEL_ARCHITECTURE,
-            pos_MLP_size=MLP_DECODER_POS_SIZE,
-            tanh=TANH_DECODER,
-            normalize=NORMALIZE_DECODER,
-
-            verbose=verbose
+            architecture= MODEL_ARCHITECTURE
         )
     ).to(device)
+else:
+    if verbose: print("Using custom EGNN implementation (from github)")
+
+    # Create the model
+    model = FGVAE(
+            encoder=EGNN_Encoder(
+                in_channels=dataset[0].num_features,
+                hidden_channels_egnn=HIDDEN_ENCODER_CHANNELS,
+                out_channels_egnn=OUT_ENCODER_CHANNELS,
+                num_egnn_layers=NUM_ENC_LAYERS,
+                latent_dim=LATENT_DIM,
+                attention=ATTENTION_ENCODER,
+                architecture=MODEL_ARCHITECTURE,
+                mode=ENCODER_TYPE,  
+                pos_projection_dim=ENCODER_POS_PROJECTION_DIM,
+                tanh=TANH_ENCODER,
+                normalize=NORMALIZE_ENCODER,
+                verbose=verbose,
+                edge_dim= dataset[0].edge_attr.size(1) if dataset[0].edge_attr is not None else 0
+            ),
+            decoder=EGNN_Decoder(
+                latent_dim=LATENT_DIM,
+                node_feature_dim_initial=dataset[0].num_features,
+                hidden_nf=HIDDEN_DECODER_CHANNELS,
+                num_egnn_layers=NUM_DEC_LAYERS,
+                attention=ATTENTION_DECODER,
+                architecture=MODEL_ARCHITECTURE,
+                pos_MLP_size=MLP_DECODER_POS_SIZE,
+                tanh=TANH_DECODER,
+                normalize=NORMALIZE_DECODER,
+                edge_dim= dataset[0].edge_attr.size(1) if dataset[0].edge_attr is not None else 0,
+                verbose=verbose
+            )
+        ).to(device)
 
 if verbose: print_model_summary(model)
 
@@ -335,11 +346,8 @@ if not os.path.exists(file_path):
 # Copy the config file to the model folder
 os.system(f'cp {config_file} {file_path}')
 
-
-
 # Create a SummaryWriter to log the training process
 writer = SummaryWriter(log_dir=file_path)   
-
 
 # Training loop
 
@@ -350,45 +358,39 @@ if CONTINUE_FROM is None:
 else:
     train_force_loss = 0.0
 
+if MODEL_ARCHITECTURE == 'hybrid_displacement':
+    print(f"\nSTARTING TRAINING IN {TRAINING_MODE} MODE...\n")
+
+if MODEL_ARCHITECTURE == 'original':
+    print(f"\nSTARTING TRAINING with {ENCODER_TYPE} encoder ...\n")
+
+
+
+train_loader, val_loader, test_loader = get_dataloaders(
+    dataset=dataset,
+    shuffle=True,
+    seed=SEED,
+    batch_size=BATCHSIZE,
+    verbose=verbose
+)
+
+   
 
 for epoch in range(STARTING_EPOCH, STARTING_EPOCH + EPOCHS):
     # random pos_ref from the dataset
     #pos_ref = train_loader.dataset[np.random.randint(len(train_loader.dataset))].pos.to(device)
 
 
-
-# ################### to be removed ##########################
-
-#     if epoch < 30:
-#         LAMBDA_ENERGY = 0.0
-#     if epoch > 30 and epoch < 50:
-#         LAMBDA_ENERGY = 1e-10
-#     if epoch > 50 and epoch < 80:
-#         LAMBDA_ENERGY = 1e-8
-#     if epoch >50 and epoch < 100:
-#         LAMBDA_ENERGY = 1e-7
-#     if epoch > 100 and epoch < 150:
-#         LAMBDA_ENERGY = 1e-6
-#     if epoch > 150 and epoch < 200:
-#         LAMBDA_ENERGY = 5e-5
-#     if epoch > 200 and epoch < 250:
-#         LAMBDA_ENERGY = 1e-5
-#     if epoch > 250 and epoch < 300:
-#         LAMBDA_ENERGY = 5e-4
-#     if epoch > 300 and epoch < 350:
-#         LAMBDA_ENERGY = 3e-4
-#     if epoch > 350 and epoch < 400:
-#         LAMBDA_ENERGY = 1e-4
-#     if epoch > 400 and epoch < 450:
-#         LAMBDA_ENERGY = 8e-3
-#     if epoch > 450:
-#         LAMBDA_ENERGY = 5e-3
+    # --- LR WARM-UP LOGIC ---
+    if WARMUP_EPOCHS > 0 and epoch < WARMUP_EPOCHS:
+        # Linearly increase the learning rate
+        lr_scale = (epoch + 1) / WARMUP_EPOCHS
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = LEARNING_RATE * lr_scale
+    # After warm-up, the LR is the standard one (and can be controlled by a scheduler)
     
 
-
-
-
-    if USE_SCHEDULER:
+    if USE_SCHEDULER and epoch >= WARMUP_EPOCHS:
         if lr > scheduler.get_last_lr()[0]:
             print(f"Adjusting learning rate from {lr} to {scheduler.get_last_lr()[0]}")
             lr = scheduler.get_last_lr()[0]
@@ -424,95 +426,139 @@ for epoch in range(STARTING_EPOCH, STARTING_EPOCH + EPOCHS):
     train_loss = 0
     train_kl_loss = 0
     train_recon_loss = 0
+    train_mi_loss = 0
+    train_tc_loss = 0
+
     if USE_FORCE_FIELD:
         train_force_loss = 0
 
     mean_train = []
     log_var_train = []
 
+  
+
     for data in train_pbar:
         data = data.to(device)
+         
+
+        if TRAINING_MODE == 'denoising':
+            # Create a noisy version of the BATCH's target positions
+            pos_ref_for_decoder = data.pos + torch.randn_like(data.pos) * NOISE_LEVEL
+        elif TRAINING_MODE == 'generative' and pos_ref is not None:
+            # Use the single, averaged reference for the whole batch
+            num_graphs_in_batch = data.batch.max().item() + 1
+            pos_ref_for_decoder = pos_ref.repeat(num_graphs_in_batch, 1)
+        elif TRAINING_MODE == 'generative' and pos_ref is None:
+            pos_ref_for_decoder = None
+        else:   
+            raise ValueError(f"Unknown TRAINING_MODE: {TRAINING_MODE}")
+
+
         optimizer.zero_grad()
 
         #pos_ref = train_loader.dataset[np.random.randint(len(train_loader.dataset))].pos.to(device)
-        pos_pred, mean, log_var, batch_vec = model(data, pos_ref=pos_ref)
+        pos_pred, mean, log_var, batch_vec = model(data, pos_ref=pos_ref_for_decoder)
 
-        # Store mean and log_var for debugging
-        # mean_train.append(mean.detach().cpu())
-        # log_var_train.append(log_var.detach().cpu())
+        # # Basic losses
+        # kl_loss = KL_divergence(mean, log_var)
+        # if advanced_recon_loss:
+        #     recon_loss = advanced_reconstruction_loss(pos_pred, data.pos, data.edge_index, data.batch, align_coords=ALIGN_RECONS_LOSS) 
+        # else:
+        #     recon_loss = reconstruction_loss(pos_pred, data.pos, data.edge_index, data.batch, align=ALIGN_RECONS_LOSS)
 
-        # Basic losses
-        kl_loss = KL_divergence(mean, log_var)
-        if advanced_recon_loss:
-            recon_loss = advanced_reconstruction_loss(pos_pred, data.pos, data.edge_index, data.batch, align_coords=ALIGN_RECONS_LOSS) 
+       
+        # # Compute base loss
+        # if kl_loss < MIN_KL:
+        #     total_loss = recon_loss
+        # else:
+        #     total_loss = recon_loss + beta * kl_loss
+
+        # 1. Compute TC-VAE loss
+
+        wait = epoch < wait_epochs  # If we are waiting for the beta annealing to start, set wait to True
+
+        tc_vae_loss, recon_loss, kl_sep, tc_loss, mi_loss = torch.tensor(0), torch.tensor(0), torch.tensor(0), torch.tensor(0), torch.tensor(0) # compute_tc_vae_loss(
+            # pos_pred = pos_pred,
+            # pos_true = data.pos,
+            # edge_index = data.edge_index, 
+            # mean = mean, 
+            # logvar = log_var, 
+            # batch = data.batch, 
+            # beta = beta) #, wait=wait ) #, tc_weight=TC_WEIGHT)
+
+        recon_loss = advanced_reconstruction_loss(pos_pred, data.pos, data.edge_index, data.batch, align_coords=ALIGN_RECONS_LOSS)
+
+        tc_vae_loss = recon_loss
+
+        # Check if the losses are finite
+        # if not torch.isfinite(tc_vae_loss):
+        #     print(f"Warning: tc_vae_loss is not finite. exiting the training loop.")
+        #     print(f"tc_vae_loss: {tc_vae_loss}, recon_loss: {recon_loss}, kl_sep: {kl_sep}, tc_loss: {tc_loss}, mi_loss: {mi_loss}")
+        #     break   
+        # if not torch.isfinite(recon_loss):
+        #     print(f"Warning: recon_loss is not finite. exiting the training loop.")
+        #     print(f"tc_vae_loss: {tc_vae_loss}, recon_loss: {recon_loss}, kl_sep: {kl_sep}, tc_loss: {tc_loss}, mi_loss: {mi_loss}")
+        #     break
+        # if not torch.isfinite(kl_sep):
+        #     print(f"Warning: kl_sep is not finite. exiting the training loop.")
+        #     print(f"tc_vae_loss: {tc_vae_loss}, recon_loss: {recon_loss}, kl_sep: {kl_sep}, tc_loss: {tc_loss}, mi_loss: {mi_loss}")
+        #     break
+        # if not torch.isfinite(tc_loss):
+        #     print(f"Warning: tc_loss is not finite. exiting the training loop.")
+        #     print(f"tc_vae_loss: {tc_vae_loss}, recon_loss: {recon_loss}, kl_sep: {kl_sep}, tc_loss: {tc_loss}, mi_loss: {mi_loss}")
+        #     break
+        # if not torch.isfinite(mi_loss):
+        #     print(f"Warning: mi_loss is not finite. exiting the training loop.")
+        #     print(f"tc_vae_loss: {tc_vae_loss}, recon_loss: {recon_loss}, kl_sep: {kl_sep}, tc_loss: {tc_loss}, mi_loss: {mi_loss}")
+        #     break
+
+    
+        if USE_FORCE_FIELD and lambda_energy > 0:
+            # 2. Compute improved physics loss
+            if SCALE_POSITIONS:
+                rescaled_pred_coords = pos_pred * max_positions
+            else:
+                rescaled_pred_coords = pos_pred
+
+            phys_loss, bond_e, angle_e, lj_e = physics_loss(
+                physics_critic, 
+                rescaled_pred_coords, 
+                data.batch, 
+                use_log=USE_LOG_FF,
+                use_bonded=USE_BOND_FF,
+                use_angle=USE_ANGLE_FF,
+                use_lj=USE_LJ_FF) 
+
+            total_loss = tc_vae_loss + lambda_energy * phys_loss
+
         else:
-            recon_loss = reconstruction_loss(pos_pred, data.pos, data.edge_index, data.batch, align=ALIGN_RECONS_LOSS)
-
-        # Check for NaN
-        if kl_loss.isnan().any() or recon_loss.isnan().any():
-            print(f"Warning: kl_loss or recon_loss is NaN. Aborting the code.")
-            sys.exit(1)
-
-        # Compute base loss
-        if kl_loss < MIN_KL:
-            total_loss = recon_loss
-        else:
-            total_loss = recon_loss + beta * kl_loss
-
-        # Initialize physics loss
-        physics_loss_val = torch.tensor(0.0, device=device)
-        
-        # Add physics loss if enabled
-        if USE_FORCE_FIELD and lambda_energy > 0: 
-            try:
-                if SCALE_POSITIONS:
-                    rescaled_pred_coords = pos_pred * max_positions
-                else:
-                    rescaled_pred_coords = pos_pred
-                
-                # Calculate differentiable physics loss
-                physics_loss_val = physics_loss(
-                    physics_critic, 
-                    rescaled_pred_coords, 
-                    data.batch, 
-                    use_log=USE_LOG_FF, 
-                    use_bonded=USE_BOND_FF, 
-                    use_angle=USE_ANGLE_FF, 
-                    use_lj=USE_LJ_FF
-                )
-                
-                # Check for NaN in physics loss
-                if physics_loss_val.isnan().any():
-                    print(f"Warning: physics_loss is NaN. Skipping physics loss for this batch.")
-                    physics_loss_val = torch.tensor(0.0, device=device)
-                else:
-                    weighted_physics = lambda_energy * physics_loss_val
-                    total_loss = total_loss + weighted_physics
-                    
-            except Exception as e:
-                print(f"Error in physics loss calculation: {e}")
-                physics_loss_val = torch.tensor(0.0, device=device)
+            # Use the TC-VAE loss directly if no force field is used
+            total_loss = tc_vae_loss
 
         # Clip gradients
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0, error_if_nonfinite=True)
+
         total_loss.backward()
         optimizer.step()
 
         # Accumulate losses (ensure all are scalars)
         train_loss += total_loss.item()
-        train_kl_loss += kl_loss.item()
+        train_tc_loss += tc_loss.item()
+        train_mi_loss += mi_loss.item()
+        train_kl_loss += kl_sep.item()
         train_recon_loss += recon_loss.item()
         if USE_FORCE_FIELD and lambda_energy > 0:
-            train_force_loss += physics_loss_val.item()
+            train_force_loss += phys_loss.item()
 
         # Update progress bar
         if USE_FORCE_FIELD and lambda_energy > 0:
             train_pbar.set_postfix(
                 loss=total_loss.item(),
                 recon_loss=recon_loss.item(),
-                kl_loss=kl_loss.item(),
-                force_loss=physics_loss_val.item(),
+                kl_loss=kl_sep.item(),
+                mi_loss=mi_loss.item(),
+                tc_loss=tc_loss.item(),
+                force_loss=phys_loss.item(),
                 beta=beta,
                 lambda_energy=lambda_energy               
             )
@@ -520,7 +566,9 @@ for epoch in range(STARTING_EPOCH, STARTING_EPOCH + EPOCHS):
             train_pbar.set_postfix(
                 loss=total_loss.item(),
                 recon_loss=recon_loss.item(),
-                kl_loss=kl_loss.item(),
+                kl_loss=kl_sep.item(),
+                mi_loss=mi_loss.item(),
+                tc_loss=tc_loss.item(),
                 beta=beta
                
             )
@@ -531,41 +579,17 @@ for epoch in range(STARTING_EPOCH, STARTING_EPOCH + EPOCHS):
     train_loss /= len(train_loader)
     train_kl_loss /= len(train_loader)
     train_recon_loss /= len(train_loader)
+    train_mi_loss /= len(train_loader)
+    train_tc_loss /= len(train_loader)
 
     if USE_FORCE_FIELD and lambda_energy > 0:
         train_force_loss /= len(train_loader)
-        print(f"Epoch {epoch+1}/{STARTING_EPOCH+EPOCHS}, Train Loss: {train_loss:.4f}, KL Loss: {train_kl_loss:.4f}, Recon Loss: {train_recon_loss:.4f}, Force Loss: {train_force_loss:.2e}")
-    else:   
-        print(f"Epoch {epoch+1}/{STARTING_EPOCH+EPOCHS}, Train Loss: {train_loss:.4f}, KL Loss: {train_kl_loss:.4f}, Recon Loss: {train_recon_loss:.2e}")
+        print(f"Epoch {epoch+1}/{STARTING_EPOCH+EPOCHS}, Train Loss: {train_loss:.4f}, KL Loss: {train_kl_loss:.2e}, TC_loss: {train_tc_loss:.2e}, MI_loss: {train_mi_loss:.2e}, Recon Loss: {train_recon_loss:.2e}, Force Loss: {train_force_loss:.2e}")
+    else:
+        print(f"Epoch {epoch+1}/{STARTING_EPOCH+EPOCHS}, Train Loss: {train_loss:.4f}, KL Loss: {train_kl_loss:.2e}, TC_loss: {train_tc_loss:.2e}, MI_loss: {train_mi_loss:.2e}, Recon Loss: {train_recon_loss:.2e}")
 
     if USE_SCHEDULER:
         scheduler.step(train_loss)
-
-
-    # Plot an histogram of the mean and variances values
-
-    # for i in range(LATENT_DIM+ENCODER_POS_PROJECTION_DIM):
-    #     val_list = [ value[i] for value in mean_train ]
-    #     print(val_list)
-
-
-    # plt.figure(figsize=(12, 6))
-    # for i in range(LATENT_DIM+ENCODER_POS_PROJECTION_DIM):
-    #     plt.subplot(2, (LATENT_DIM+ENCODER_POS_PROJECTION_DIM+1)//2, i+1)
-    #     plt.hist([value[i].cpu().numpy() for value in mean_train], bins=30, alpha=0.5, label='Mean')
-    #     plt.title(f"Latent Dim {i}")
-    #     plt.legend()
-    # plt.tight_layout()
-    # plt.show()
-
-    # plt.figure(figsize=(12, 6))
-    # for i in range(LATENT_DIM+ENCODER_POS_PROJECTION_DIM):
-    #     plt.subplot(2, (LATENT_DIM+ENCODER_POS_PROJECTION_DIM+1)//2, i+1)
-    #     plt.hist([value[i].cpu().numpy() for value in log_var_train], bins=30, alpha=0.5, label='Log Var')
-    #     plt.title(f"Latent Dim {i}")
-    #     plt.legend()
-    # plt.tight_layout()
-    # plt.show()
 
 
     # VALIDATION - Fixed to match training logic
@@ -579,8 +603,21 @@ for epoch in range(STARTING_EPOCH, STARTING_EPOCH + EPOCHS):
     with torch.no_grad():
         for data in val_loader:
             data = data.to(device)
+
+             
+            if TRAINING_MODE == 'denoising':
+                # Create a noisy version of the BATCH's target positions
+                pos_ref_for_decoder = data.pos + torch.randn_like(data.pos) * NOISE_LEVEL
+            elif TRAINING_MODE == 'generative' and pos_ref is not None:
+            # Use the single, averaged reference for the whole batch
+                num_graphs_in_batch = data.batch.max().item() + 1
+                pos_ref_for_decoder = pos_ref.repeat(num_graphs_in_batch, 1)
+            elif TRAINING_MODE == 'generative' and pos_ref is None:
+                pos_ref_for_decoder = None
+            else:
+                raise ValueError(f"Unknown TRAINING_MODE: {TRAINING_MODE}")
             #pos_ref = val_loader.dataset[np.random.randint(len(val_loader.dataset))].pos.to(device)
-            pos_pred, mean, log_var, batch_vec = model(data, pos_ref=pos_ref)
+            pos_pred, mean, log_var, batch_vec = model(data, pos_ref=pos_ref_for_decoder)
             
             # Basic losses
             kl_loss = KL_divergence(mean, log_var)
@@ -638,7 +675,7 @@ for epoch in range(STARTING_EPOCH, STARTING_EPOCH + EPOCHS):
     if USE_FORCE_FIELD and lambda_energy > 0:
         val_force_loss /= len(val_loader)
 
-    print(f"Epoch {epoch+1}/{STARTING_EPOCH+EPOCHS}, Validation Loss: {val_loss:.4f}")
+    print(f"Epoch {epoch+1}/{STARTING_EPOCH+EPOCHS}, Validation Loss: {val_loss:.2e}")
 
     # Log the results in TensorBoard
     writer.add_scalar('Loss/train', train_loss, epoch)
@@ -647,6 +684,8 @@ for epoch in range(STARTING_EPOCH, STARTING_EPOCH + EPOCHS):
     writer.add_scalar('Loss/KL_val', val_kl_loss, epoch)
     writer.add_scalar('Loss/Reconstruction_train', train_recon_loss, epoch)
     writer.add_scalar('Loss/Reconstruction_val', val_recon_loss, epoch)
+    writer.add_scalar('Loss/TC_train', train_tc_loss, epoch)
+    writer.add_scalar('Loss/MI_train', train_mi_loss, epoch)
     
     if USE_FORCE_FIELD and lambda_energy > 0:
         writer.add_scalar('Loss/Physics_train', train_force_loss, epoch)
@@ -664,105 +703,8 @@ for epoch in range(STARTING_EPOCH, STARTING_EPOCH + EPOCHS):
         torch.save(model.state_dict(), file_path + f'model_epoch_{epoch+1}.pth')
         if verbose: print(f"Model saved to {file_path}model_epoch_{epoch+1}.pth")
 
-
-    if (epoch + 1) % 5 == 0 or epoch == EPOCHS - 1:
-
-        if TEST_MODEL:
-            #################################### Test the model ########################################
-            print()
-            print("Testing the model...", end=' ')
-            #print("Using the initial position of the sample as the initial position of the decoder...")
-
-            model.eval()
-
-            pred_pos_list = []
-            true_pos_list = []
-            recon_loss_list = []
-            force_loss_list = []
-
-            for data in test_loader:
-                data = data.to(device)
-                with torch.no_grad():
-
-                    #pos_ref = test_loader.dataset[np.random.randint(len(test_loader.dataset))].pos.to(device)
-
-                    pos_pred, mean, log_var, batch_vec = model(data, pos_ref=pos_ref)
-                    kl_loss = KL_divergence(mean, log_var)
-                    recon_loss = reconstruction_loss(pos_pred, data.pos, data.batch, align=ALIGN_RECONS_LOSS)
-                    total_loss = recon_loss + beta * kl_loss
-                    if USE_FORCE_FIELD:
-                        if SCALE_POSITIONS:
-                            rescaled_pred_coords = pos_pred * max_positions
-                        else:
-                            rescaled_pred_coords = pos_pred
-                        energies = [ physics_critic.openMM_energy(coords) for coords in rescaled_pred_coords.view(data.num_graphs, -1, 3)]
-                        # convert energies from kJ/mol to eV
-                        loss_physics = torch.stack(energies).mean()  # / 96.485
-                        if lambda_energy > 0:
-                            total_loss += lambda_energy * loss_physics
-                        
-                    pred_pos_list.append(pos_pred.detach().cpu().numpy())
-                    true_pos_list.append(data.pos.detach().cpu().numpy())
-                    if USE_FORCE_FIELD:
-                        force_loss_list.append(loss_physics.item())
-                    else:
-                        force_loss_list.append(0.0)
-                    recon_loss_list.append(recon_loss.item())
-
-            # # Plot the loss
-            # plt.figure(figsize=(10, 5))
-            # plt.plot(recon_loss_list, label='Reconstruction Loss')
-            # plt.hlines(y=np.mean(recon_loss_list), xmin=0, xmax=len(recon_loss_list), color='r', linestyle='--', label='Mean Loss')
-            # plt.xlabel('Batch')
-            # plt.ylabel('Loss')
-            # plt.title('Reconstruction Loss for Test Set')
-            # plt.legend()
-
-            # file_path = file_path if file_path.endswith('/') else file_path + '/'
-            # plt.savefig(file_path + 'recon_loss.png')
-
-            # Extract the best reconstruction loss and corresponding predictions
-            if USE_FORCE_FIELD:
-                best_recon_index = np.argmin(force_loss_list)
-            else:
-                best_recon_index = np.argmin(recon_loss_list)
-        
-            best_coords_pred = pred_pos_list[best_recon_index]
-            best_coords_true = true_pos_list[best_recon_index]
-            best_coords_pred_t = torch.tensor(best_coords_pred, dtype=torch.float32).to(device)
-            best_coords_true_t = torch.tensor(best_coords_true, dtype=torch.float32).to(device)
-
-            #aligned_mse = calculate_aligned_mse_loss(best_coords_pred_t, best_coords_true_t, data.batch).item()
-
-            R,T = find_rigid_alignment(best_coords_pred_t, best_coords_true_t)
-            #print(f"Rigid Transform R: {R},\n T: {T}")
-
-            aligned_pred_t = (R @ best_coords_pred_t.T).T + T
-            aligned_pred = aligned_pred_t.detach().cpu().numpy()
-
-            # Calculate the aligned MSE loss
-            aligned_mse = np.mean((aligned_pred - best_coords_true)**2)
-
-            # Plot the aligned predictions
-            fig = plt.figure(figsize=(10, 10))
-            ax = fig.add_subplot(111, projection='3d')
-            ax.scatter(best_coords_true[:, 0], best_coords_true[:, 1], best_coords_true[:, 2], c='b', label='True Coordinates', alpha=0.5)
-            ax.scatter(aligned_pred[:, 0], aligned_pred[:, 1], aligned_pred[:, 2], c='r', label='Aligned Predicted Coordinates', alpha=0.5)
-            ax.set_xlabel('X Coordinate')
-            ax.set_ylabel('Y Coordinate')
-            ax.set_zlabel('Z Coordinate')
-            if USE_FORCE_FIELD:
-                ax.text2D(0.05, 0.95, f'(aligned) MSE: {np.round(float(aligned_mse),4)}, Force Loss: {np.round(float(force_loss_list[best_recon_index]),4)}', transform=ax.transAxes, fontsize=12, verticalalignment='top')
-            else:
-                ax.text2D(0.05, 0.95, f'(aligned) MSE: {np.round(float(aligned_mse.item()),4)}', transform=ax.transAxes, fontsize=12, verticalalignment='top')
-            ax.set_title('True vs Aligned Predicted Coordinates for Best Reconstruction')
-            plt.legend()
-            # Save the figure
-            if not os.path.exists(file_path + 'test_reconstruction'):
-                os.makedirs(file_path + 'test_reconstruction')  
-            if not file_path.endswith('/'):
-                file_path += '/'    
-            plt.savefig(file_path + f'test_reconstruction/aligned_best_reconstruction_{epoch+1}_epochs.png')
-
-            print("Done!")
-
+    # === MODIFIED TEST/ANALYSIS BLOCK ===
+    # Run analysis periodically or at the end of training
+    if TEST_MODEL and ((epoch + 1) % 5== 0 or epoch == EPOCHS - 1):
+        ep = epoch + 1
+        run_full_analysis(model, test_loader, device, file_path, config, physics_critic, pos_ref, max_positions, ep, verbose=verbose)
