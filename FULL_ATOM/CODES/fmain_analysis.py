@@ -30,6 +30,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR, StepLR, ReduceLROnPlatea
 sys.path.append("LIBS")
 from LIBS.utils import *
 from LIBS.FGVAE import *
+from LIBS.weight_check import inspect_model_state
 
 print ("Importing force field module...")
 from LIBS.force_field import *
@@ -69,6 +70,8 @@ if verbose: print(f"Configuration parameters: {config}")
 
 
 # EXTRA PARAMETERS NOT IN THE CONFIG FILE
+INSPECT_MODEL_STATE = False
+
 
 
 # PARAMETERS IN THE CONFIG FILE
@@ -111,9 +114,14 @@ EPOCHS = config.get('EPOCHS', 50)
 BATCHSIZE = config.get('BATCHSIZE', 64)
 LEARNING_RATE = config.get('LEARNING_RATE', 1E-4)
 WEIGHT_DECAY = config.get('WEIGHT_DECAY', 0) # weight decay for the optimizer, set to 0 to disable weight decay ( bad idea using it for vae)
-advanced_recon_loss = config.get('advanced_recon_loss', True) # if True, the advanced reconstruction loss is used, otherwise the standard reconstruction loss is used
 return_pos_angstrom = config.get('return_pos_angstrom', False) # if True, the positions are returned in Angstrom, otherwise they are returned in the range [0, 1]
 
+advanced_recon_loss = config.get('advanced_recon_loss', True) # if True, the advanced reconstruction loss is used, otherwise the standard reconstruction loss is used
+advanced_kl_loss = config.get('advanced_kl_loss', False) # if True, the advanced KL divergence loss is used, otherwise the standard KL divergence loss is used
+
+mi_loss_weight = config.get('mi_weight', 1.0) # weight for the mutual information loss in the total loss function, used only if advanced_kl_loss is True
+tc_loss_weight = config.get('tc_weight', 1.0) # weight for the total correlation loss in the total loss function, used only if advanced_kl_loss is True
+dkl_loss_weight = config.get('dkl_weight', 1.0) # weight for the KL divergence loss in the total loss function, used only if advanced_kl_loss is True
 #### Scheduler parameters
 USE_SCHEDULER = config.get('USE_SCHEDULER', False) # if True, the learning rate scheduler is used
 SCHEDULER_PATIENCE = config.get('SCHEDULER_PATIENCE', 10) # number of epochs with no improvement after which learning rate will be reduced
@@ -386,6 +394,8 @@ for epoch in range(STARTING_EPOCH, STARTING_EPOCH + EPOCHS):
     train_loss = 0
     train_kl_loss = 0
     train_recon_loss = 0
+    train_mi_loss = 0
+    train_tc_loss = 0
     if USE_FORCE_FIELD:
         train_force_loss = 0
 
@@ -393,7 +403,7 @@ for epoch in range(STARTING_EPOCH, STARTING_EPOCH + EPOCHS):
     log_var_train = []
 
   
-
+    index_batch = 0 
     for data in train_pbar:
         data = data.to(device)
          
@@ -413,6 +423,7 @@ for epoch in range(STARTING_EPOCH, STARTING_EPOCH + EPOCHS):
 
         optimizer.zero_grad()
 
+    
         #pos_ref = train_loader.dataset[np.random.randint(len(train_loader.dataset))].pos.to(device)
         pos_pred, mean, log_var, batch_vec = model(data, pos_ref=pos_ref_for_decoder)
 
@@ -420,14 +431,36 @@ for epoch in range(STARTING_EPOCH, STARTING_EPOCH + EPOCHS):
         # mean_train.append(mean.detach().cpu())
         # log_var_train.append(log_var.detach().cpu())
 
+        if advanced_kl_loss:
+            # Not implemented the case where advanced_kl_loss is True and advanced_recon_loss is False
+           
+            total_loss, recon_loss, kl_loss, tc_loss, mi_loss = compute_tc_vae_loss(
+                    pos_pred=pos_pred,
+                    pos_true=data.pos,
+                    edge_index=data.edge_index, 
+                    mean=mean, 
+                    logvar=log_var, 
+                    batch=data.batch, 
+                    beta=beta,
+                    mi_weight=mi_loss_weight,
+                    tc_weight=tc_loss_weight,
+                    dkl_weight=dkl_loss_weight
+                    )
+            if not advanced_recon_loss:
+                recon_loss = reconstruction_loss(pos_pred, data.pos, data.batch, align=ALIGN_RECONS_LOSS)
+                total_loss = recon_loss + beta * (dkl_loss_weight * kl_loss + tc_loss_weight * tc_loss + mi_loss_weight * mi_loss)
 
-
-        # Basic losses
-        kl_loss = KL_divergence(mean, log_var)
-        if advanced_recon_loss:
-            recon_loss = advanced_reconstruction_loss(pos_pred, data.pos, data.edge_index, data.batch, align_coords=ALIGN_RECONS_LOSS) 
         else:
-            recon_loss = reconstruction_loss(pos_pred, data.pos, data.edge_index, data.batch, align=ALIGN_RECONS_LOSS)
+        # Basic losses
+            kl_loss = KL_divergence(mean, log_var)
+            tc_loss, mi_loss = torch.tensor(0.0), torch.tensor(0.0)
+
+            if advanced_recon_loss:
+                recon_loss = advanced_reconstruction_loss(pos_pred, data.pos, data.edge_index, data.batch, align_coords=ALIGN_RECONS_LOSS) 
+            else:
+                recon_loss = reconstruction_loss(pos_pred, data.pos, data.edge_index, data.batch, align=ALIGN_RECONS_LOSS)
+
+            total_loss = recon_loss + beta * kl_loss
 
         #Check for NaN
         # if kl_loss.isnan().any() or recon_loss.isnan().any():
@@ -435,10 +468,10 @@ for epoch in range(STARTING_EPOCH, STARTING_EPOCH + EPOCHS):
         #     sys.exit(1)
 
         # Compute base loss
-        if kl_loss < MIN_KL:
-            total_loss = recon_loss
-        else:
-            total_loss = recon_loss + beta * kl_loss
+        # if kl_loss < MIN_KL:
+        #     total_loss = recon_loss
+        # else:
+        #     total_loss = recon_loss + beta * kl_loss
 
         # Initialize physics loss
         physics_loss_val = torch.tensor(0.0, device=device)
@@ -480,29 +513,63 @@ for epoch in range(STARTING_EPOCH, STARTING_EPOCH + EPOCHS):
                 print(f"Error in physics loss calculation: {e}")
                 physics_loss_val = torch.tensor(0.0, device=device)
 
+        total_loss.backward()
+
+        if INSPECT_MODEL_STATE and epoch % 5 == 0 and index_batch == 0:
+            inspect_model_state(model, data, loss=total_loss, level='basic')
+            index_batch += 1  # Ensure this runs only once per epoch
+
+
         # Clip gradients
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0, error_if_nonfinite=True)
 
-        total_loss.backward()
         optimizer.step()
 
         # Accumulate losses (ensure all are scalars)
         train_loss += total_loss.item()
         train_kl_loss += kl_loss.item()
         train_recon_loss += recon_loss.item()
+        train_mi_loss += mi_loss.item() if isinstance(mi_loss, torch.Tensor) else mi_loss
+        train_tc_loss += tc_loss.item() if isinstance(tc_loss, torch.Tensor) else tc_loss
+
         if USE_FORCE_FIELD and lambda_energy > 0:
             train_force_loss += physics_loss_val.item()
 
         # Update progress bar
         if USE_FORCE_FIELD and lambda_energy > 0:
-            train_pbar.set_postfix(
-                loss=total_loss.item(),
-                recon_loss=recon_loss.item(),
-                kl_loss=kl_loss.item(),
-                force_loss=physics_loss_val.item(),
-                beta=beta,
-                lambda_energy=lambda_energy               
-            )
+            if advanced_kl_loss:
+                train_pbar.set_postfix(
+                    loss=total_loss.item(),
+                    recon_loss=recon_loss.item(),
+                    kl_loss=kl_loss.item(),
+                    tc_loss=tc_loss.item(),
+                    mi_loss=mi_loss.item(),
+                    force_loss=physics_loss_val.item(),
+                    beta=beta,
+                    lambda_energy=lambda_energy
+                )
+
+    
+            else:
+                train_pbar.set_postfix(
+                    loss=total_loss.item(),
+                    recon_loss=recon_loss.item(),
+                    kl_loss=kl_loss.item(),
+                    force_loss=physics_loss_val.item(),
+                    beta=beta,
+                    lambda_energy=lambda_energy               
+                )
+        elif advanced_kl_loss:
+                train_pbar.set_postfix(
+                    loss=total_loss.item(),
+                    recon_loss=recon_loss.item(),
+                    kl_loss=kl_loss.item(),
+                    tc_loss=tc_loss.item(),
+                    mi_loss=mi_loss.item(),
+                    force_loss=physics_loss_val.item(),
+                    beta=beta,
+                    lambda_energy=lambda_energy               
+                )
         else:
             train_pbar.set_postfix(
                 loss=total_loss.item(),
@@ -562,7 +629,7 @@ for epoch in range(STARTING_EPOCH, STARTING_EPOCH + EPOCHS):
             if advanced_recon_loss:
                 recon_loss = advanced_reconstruction_loss(pos_pred, data.pos, data.edge_index, data.batch, align_coords=ALIGN_RECONS_LOSS) 
             else:
-                recon_loss = reconstruction_loss(pos_pred, data.pos, data.edge_index, data.batch, align=ALIGN_RECONS_LOSS)
+                recon_loss = reconstruction_loss(pos_pred, data.pos, data.batch, align=ALIGN_RECONS_LOSS)
 
             # Base validation loss
             if kl_loss < MIN_KL:

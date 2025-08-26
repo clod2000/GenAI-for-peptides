@@ -15,7 +15,6 @@
 # 'hybrid_displacement': The new model that uses an explicit encoder and a displacement decoder.
 
 MODEL_ARCHITECTURE = original
-#hybrid_displacement
 # original
 
 # If using 'hybrid_displacement', this is the dimension for the flattened coordinate projection.
@@ -28,7 +27,7 @@ ENCODER_POS_PROJECTION_DIM: 8
 
 
 ## Training type
-TRAINING_MODE = denoising
+TRAINING_MODE = generative
 # 'denoising' or 'generative'
 NOISE_LEVEL = 0.05
 # in nm
@@ -37,12 +36,12 @@ NOISE_LEVEL = 0.05
 #### model parameters
 
 ## encoder
-ENCODER_TYPE = denoise
+ENCODER_TYPE = standard
 #denoise
 NOISE_LV = 0.1
 #standard
 HIDDEN_ENCODER_CHANNELS = 256
-OUT_ENCODER_CHANNELS = 64
+OUT_ENCODER_CHANNELS = 128
 NUM_ENC_LAYERS: 6
 ATTENTION_ENCODER = True
 LATENT_DIM: 16
@@ -52,7 +51,7 @@ NORMALIZE_ENCODER = True
 # decoder
 MLP_DECODER_POS_SIZE = [128,256,128]
 HIDDEN_DECODER_CHANNELS = 256
-NUM_DEC_LAYERS: 6
+NUM_DEC_LAYERS: 4
 ATTENTION_DECODER = True
 TANH_DECODER = True
 NORMALIZE_DECODER =  True
@@ -66,21 +65,28 @@ return_pos_angstrom = False
 
 #### training parameters
 EPOCHS = 30
-BATCHSIZE =  128
+BATCHSIZE = 64
 LEARNING_RATE =  1E-5
 WEIGHT_DECAY = 0
+
 advanced_recon_loss = True
+advanced_kl_loss = True
+
+tc_weight=20.0
+mi_weight = 0
+dkl_weight=1.0
+
 
 
 #### Scheduler parameters
-USE_SCHEDULER =  False
+USE_SCHEDULER =  True
 SCHEDULER_PATIENCE =  10
 SCHEDULER_FACTOR = 0.5
 SCHEDULER_TYPE = ReduceLROnPlateau
 SCHEDULER_THRESHOLD =  0.0001
 
 # Beta annealing parameters
-BETA = 0.0001
+BETA = 1e-4
 wait_epochs =  20
 annealing_epochs = 100
 beta_min = 0.0001
@@ -89,8 +95,7 @@ beta_max = 0.001
 # force field parameters
 USE_FORCE_FIELD = True
 PDB_FOR_ENERGY = ../DATA/raw/protein_only.pdb
-LAMBDA_ENERGY =  1e-20
-#1e-10
+LAMBDA_ENERGY = 0
 wait_lambda_epochs = 10
 lambda_annealing_epochs = 100
 lambda_min = 1e-6
@@ -100,9 +105,9 @@ USE_LOG_FF = False
 # if True, the force field loss is calculated using log scaling, otherwise it is calculated using the raw values
 USE_BOND_FF = True
 # if True, the bonded energy is included in the force field loss
-USE_ANGLE_FF = True
+USE_ANGLE_FF = False
 # if True, the angle energy is included in the force field loss
-USE_LJ_FF = True
+USE_LJ_FF = False
 # if True, the Lennard-Jones energy is included in the force field loss
 
 
@@ -110,12 +115,12 @@ USE_LJ_FF = True
 # Other parameters
 DISABLE_TQDM = False
 SEED =  42
-NAME_SIMULATION = start_ff
+NAME_SIMULATION = adv_rec_loss_ls_16
 #bonds_angle_lj_210
-NAME_FOLDER = denoise_encoder_previous_ff
+NAME_FOLDER = meeting
 CONTINUE_FROM = None 
-# /home/clod/Desktop/THESIS_2/FULL_ATOM/RUNS/original/denoise_encoder_new_ff/test_bonds_10/model_epoch_20.pth
-STARTING_EPOCH = 20
+#/home/clod/Desktop/THESIS_2/FULL_ATOM/RUNS/original/meeting/adv_rec_loss-continues/model_epoch_60.pth
+STARTING_EPOCH = 60
 ALIGN_RECONS_LOSS = True
 TEST_MODEL = True
 MIN_KL = 0.01

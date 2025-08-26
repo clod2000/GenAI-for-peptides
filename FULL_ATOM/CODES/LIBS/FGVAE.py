@@ -165,7 +165,8 @@ class EGNN_Encoder(nn.Module):
         graph_embedding_h = self.pool(h_enc, batch) 
 
         # --- ARCHITECTURE-SPECIFIC FORWARD PASS ---
-        if self.architecture == 'hybrid_displacement':
+        #if self.architecture == 'hybrid_displacement':
+        if False:
             # 1. Center the coordinates to make them translation-invariant
             p_enc_centered = p_enc - self.pool(p_enc, batch).repeat_interleave(torch.bincount(batch), dim=0)
 
@@ -242,7 +243,7 @@ class EGNN_Decoder(nn.Module):
             
         else: # Original architecture
 
-            self.map_initial_node = nn.Linear(node_feature_dim_initial , hidden_nf)
+            #.map_initial_node = nn.Linear(node_feature_dim_initial , hidden_nf)
             self.initial_pos_MLP = nn.Sequential(
                 nn.Linear(latent_dim + node_feature_dim_initial, pos_MLP_size[0]),
                 nn.LeakyReLU(),

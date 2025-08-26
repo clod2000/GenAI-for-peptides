@@ -28,8 +28,9 @@ import argparse
 from torch.optim.lr_scheduler import CosineAnnealingLR, StepLR, ReduceLROnPlateau
 
 sys.path.append("LIBS")
-from LIBS.Putils import *
-from LIBS.PIGVAE import *
+from LIBS.utils import *
+from LIBS.Putils import create_physics_informed_dataset
+from LIBS.new_PIGVAE import *
 from LIBS.PIGVAE_off import *
 
 print ("Importing force field module...")
@@ -66,13 +67,14 @@ except Exception as e:
 
 if verbose: print(f"Configuration parameters: {config}")
 
-#exit()
+debug = False
+weight_mean_debug = False # if True, the mean weight gradient is printed during training, used for debugging purposes
 
 
 # EXTRA PARAMETERS NOT IN THE CONFIG FILE
-OFFICIAL_EGNN = True
-
-# PARAMETERS IN THE CONFIG FILE
+OFFICIAL_EGNN = False
+AE = False # if True, the model is trained as an autoencoder, otherwise it is trained as a VAE
+FREEZE_EXCEPT_LOGVAR = False # if True , all the parameters of the model are frozen except the log variance, used to switch from AE to VAE trainings
 
 # Architecture parameters
 MODEL_ARCHITECTURE = config.get('MODEL_ARCHITECTURE', 'original') # architecture of the model, can be 'original' or 'hybrid_displacement'
@@ -81,6 +83,7 @@ ENCODER_POS_PROJECTION_DIM = config.get('ENCODER_POS_PROJECTION_DIM', 64) # dime
 # Training parameters
 TRAINING_MODE = config.get('TRAINING_MODE', 'generative') # 'denoising' or 'generative'
 NOISE_LEVEL = config.get('NOISE_LEVEL', 0.1) # e.g., 0.1 nm noise
+NOISE_ANNEALING = config.get('NOISE_ANNEALING', True) # if True, the noise level is annealed during training, otherwise it is fixed
 
 #### model parameters
 # encoder
@@ -113,8 +116,15 @@ BATCHSIZE = config.get('BATCHSIZE', 64)
 LEARNING_RATE = config.get('LEARNING_RATE', 1E-4)
 WARMUP_EPOCHS = config.get('WARMUP_EPOCHS', 0)
 WEIGHT_DECAY = config.get('WEIGHT_DECAY', 0) # weight decay for the optimizer, set to 0 to disable weight decay ( bad idea using it for vae)
-advanced_recon_loss = config.get('advanced_recon_loss', True) # if True, the advanced reconstruction loss is used, otherwise the standard reconstruction loss is used
 return_pos_angstrom = config.get('return_pos_angstrom', False) # if True, the positions are returned in Angstrom, otherwise they are returned in the range [0, 1]
+
+
+advanced_recon_loss = config.get('advanced_recon_loss', True) # if True, the advanced reconstruction loss is used, otherwise the standard reconstruction loss is used
+advanced_kl_loss = config.get('advanced_kl_loss', True) # if True, the advanced KL divergence loss is used, otherwise the standard KL divergence loss is used
+
+tc_weight = config.get('tc_weight', 10.0) # weight for the total correlation loss in the advanced KL divergence loss
+mi_weight = config.get('mi_weight', 1.0) # weight for the mutual information loss in the advanced KL divergence loss
+dkl_weight = config.get('dkl_weight', 1.0) # weight for the dimension-wise KL divergence loss in the advanced KL divergence loss
 
 #### Scheduler parameters
 USE_SCHEDULER = config.get('USE_SCHEDULER', False) # if True, the learning rate scheduler is used
@@ -125,11 +135,12 @@ SCHEDULER_THRESHOLD = config.get('SCHEDULER_THRESHOLD', 0.0001) # threshold for 
 
 # Beta annealing parameters
 BETA = config.get('BETA', None)
+CYCLIC_BETA = config.get('CYCLIC_BETA', False) # if True, the beta is cycled between beta_min and beta_max
+CYCLE_LENGTH = config.get('CYCLE_LENGTH', 10) # length of the cycle for cyclic beta annealing
 wait_epochs = config.get('wait_epochs', 0)
 annealing_epochs = config.get('annealing_epochs', 50)
 beta_min = config.get('beta_min', 0.00001)
 beta_max = config.get('beta_max', 0.0001)
-TC_WEIGHT = config.get('TC_WEIGHT', 1) # weight for the TC loss in the total loss function, if None, the TC loss is not used
 
 # force field parameters
 USE_FORCE_FIELD = config.get('USE_FORCE_FIELD', True) # if True, the force field is used to calculate the energy of the system
@@ -250,15 +261,22 @@ if OFFICIAL_EGNN:
             in_channels=dataset[0].num_features,
             hidden_channels=HIDDEN_ENCODER_CHANNELS,
             num_egnn_layers=NUM_ENC_LAYERS,
-            latent_dim=LATENT_DIM
+            latent_dim=LATENT_DIM,
+            mode= ENCODER_TYPE,
+            attention = ATTENTION_ENCODER,
+            debug= debug
         ),
         decoder=Official_EGNN_Decoder(
             latent_dim=LATENT_DIM,
             node_feature_dim_initial=dataset[0].num_features,
             hidden_channels=HIDDEN_DECODER_CHANNELS,
             num_egnn_layers=NUM_DEC_LAYERS,
-            architecture= MODEL_ARCHITECTURE
-        )
+            architecture= MODEL_ARCHITECTURE,
+            attention = ATTENTION_DECODER,
+            debug= debug
+            
+        ),
+        AE = AE
     ).to(device)
 else:
     if verbose: print("Using custom EGNN implementation (from github)")
@@ -292,7 +310,8 @@ else:
                 normalize=NORMALIZE_DECODER,
                 edge_dim= dataset[0].edge_attr.size(1) if dataset[0].edge_attr is not None else 0,
                 verbose=verbose
-            )
+            ),
+            AE = AE
         ).to(device)
 
 if verbose: print_model_summary(model)
@@ -304,8 +323,32 @@ if CONTINUE_FROM is not None:
     model.load_state_dict(torch.load(CONTINUE_FROM, map_location=device))
     print("Model loaded successfully.")
 
+
+
+if FREEZE_EXCEPT_LOGVAR:
+    # --- FREEZING LOGIC ---
+    print("Freezing all layers except encoder.fc_log_var...")
+    for name, param in model.named_parameters():
+        param.requires_grad = False # Freeze everything by default
+
+    for name, param in model.encoder.to_latent_logvar.named_parameters():
+        param.requires_grad = True # Un-freeze only this layer's parameters
+        print(f"  - Unfrozen: {name}")
+
+    for name, param in model.encoder.to_latent_mean.named_parameters():
+        param.requires_grad = True
+        print(f"  - Unfrozen: {name}")
+
+    # Create a new optimizer that only sees the unfrozen parameters
+    optimizer = torch.optim.Adam(
+        filter(lambda p: p.requires_grad, model.parameters()), 
+        lr=LEARNING_RATE # Use a standard LR for this simple task
+    )
+
+else:
 # Create the optimizer
-optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
+    optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
+
 
 # Create the scheduler
 if USE_SCHEDULER:
@@ -314,7 +357,7 @@ if USE_SCHEDULER:
     elif SCHEDULER_TYPE == 'StepLR':
         scheduler = StepLR(optimizer, step_size=SCHEDULER_PATIENCE, gamma=SCHEDULER_FACTOR)
     elif SCHEDULER_TYPE == 'ReduceLROnPlateau':
-        scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=SCHEDULER_FACTOR, patience=SCHEDULER_PATIENCE, threshold=SCHEDULER_THRESHOLD, min_lr=1e-6)
+        scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=SCHEDULER_FACTOR, patience=SCHEDULER_PATIENCE, threshold=SCHEDULER_THRESHOLD, min_lr=1e-8)
     else: 
         raise ValueError(f"Unknown scheduler type: {SCHEDULER_TYPE}")
 
@@ -378,8 +421,9 @@ train_loader, val_loader, test_loader = get_dataloaders(
 
 for epoch in range(STARTING_EPOCH, STARTING_EPOCH + EPOCHS):
     # random pos_ref from the dataset
-    #pos_ref = train_loader.dataset[np.random.randint(len(train_loader.dataset))].pos.to(device)
+    #pos_ref = train_loader.dataset[np.random.randint(len(train_loader.dataset))].pos.to(device)new_egnn.sh
 
+  
 
     # --- LR WARM-UP LOGIC ---
     if WARMUP_EPOCHS > 0 and epoch < WARMUP_EPOCHS:
@@ -399,11 +443,14 @@ for epoch in range(STARTING_EPOCH, STARTING_EPOCH + EPOCHS):
 
     if BETA is not None:
         beta = BETA
-    else:
+    elif not CYCLIC_BETA:
         beta = beta_annealer(epoch,beta_min, beta_max, annealing_epochs,wait_epochs )
+    else:
+        beta = cyclic_annealing(epoch, beta_min, beta_max, CYCLE_LENGTH)
+        print(f"Using cyclic beta annealing: {beta}")
 
     if USE_FORCE_FIELD:
-        
+
         if epoch < wait_lambda_epochs:
             lambda_energy = 0.0
         elif LAMBDA_ENERGY is not None:
@@ -425,6 +472,7 @@ for epoch in range(STARTING_EPOCH, STARTING_EPOCH + EPOCHS):
     model.train()
     train_loss = 0
     train_kl_loss = 0
+    train_kl_sep_loss = 0
     train_recon_loss = 0
     train_mi_loss = 0
     train_tc_loss = 0
@@ -441,7 +489,7 @@ for epoch in range(STARTING_EPOCH, STARTING_EPOCH + EPOCHS):
         data = data.to(device)
          
 
-        if TRAINING_MODE == 'denoising':
+        if TRAINING_MODE == 'denoising': # Not used anymore
             # Create a noisy version of the BATCH's target positions
             pos_ref_for_decoder = data.pos + torch.randn_like(data.pos) * NOISE_LEVEL
         elif TRAINING_MODE == 'generative' and pos_ref is not None:
@@ -456,63 +504,99 @@ for epoch in range(STARTING_EPOCH, STARTING_EPOCH + EPOCHS):
 
         optimizer.zero_grad()
 
-        #pos_ref = train_loader.dataset[np.random.randint(len(train_loader.dataset))].pos.to(device)
-        pos_pred, mean, log_var, batch_vec = model(data, pos_ref=pos_ref_for_decoder)
+        noise = NOISE_LEVEL if not NOISE_ANNEALING else denoise_annealing(epoch, EPOCHS, start_value= NOISE_LEVEL, end_value=0.0)
+
+        pos_pred, mean, log_var, batch_vec = model(data, pos_ref=pos_ref_for_decoder, new_noise_level=noise)
 
         # # Basic losses
-        # kl_loss = KL_divergence(mean, log_var)
-        # if advanced_recon_loss:
-        #     recon_loss = advanced_reconstruction_loss(pos_pred, data.pos, data.edge_index, data.batch, align_coords=ALIGN_RECONS_LOSS) 
-        # else:
-        #     recon_loss = reconstruction_loss(pos_pred, data.pos, data.edge_index, data.batch, align=ALIGN_RECONS_LOSS)
+        if not advanced_kl_loss and not AE:
+            kl_loss = KL_divergence(mean, log_var)
+            if advanced_recon_loss:
+                recon_loss = advanced_reconstruction_loss(pos_pred, data.pos, data.edge_index, data.batch, align_coords=ALIGN_RECONS_LOSS) 
+            else:
+                recon_loss = reconstruction_loss(pos_pred, data.pos, data.batch, align=ALIGN_RECONS_LOSS)
 
-       
-        # # Compute base loss
-        # if kl_loss < MIN_KL:
-        #     total_loss = recon_loss
-        # else:
-        #     total_loss = recon_loss + beta * kl_loss
+            if kl_loss < MIN_KL: # free-bits KL loss
+                total_loss = recon_loss
+            else:
+                total_loss = recon_loss + beta * kl_loss
 
-        # 1. Compute TC-VAE loss
+        elif not advanced_kl_loss and AE:
+            # In this case, we compute the AE loss, which is just the reconstruction loss
+            recon_loss = reconstruction_loss(pos_pred, data.pos, data.edge_index, data.batch, align=ALIGN_RECONS_LOSS)
+            total_loss = recon_loss
+            kl_loss = torch.tensor(0.0)
 
-        wait = epoch < wait_epochs  # If we are waiting for the beta annealing to start, set wait to True
+        elif advanced_kl_loss:
+            # Advanced losses
+            # Here we compute the advanced TC-VAE loss, which includes the mutual information and the total correlation
+            # This is done by computing the TC-VAE loss with the mean and log variance of the encoder
+            # The TC-VAE loss is computed as follows:
+            # 1. Compute the reconstruction loss
+            # 2. Compute the KL divergence between the mean and log variance
+            # 3. Compute the mutual information and total correlation
+            # 4. Compute the total loss as the sum of the reconstruction loss, KL divergence, mutual information and total correlation
 
-        tc_vae_loss, recon_loss, kl_sep, tc_loss, mi_loss = torch.tensor(0), torch.tensor(0), torch.tensor(0), torch.tensor(0), torch.tensor(0) # compute_tc_vae_loss(
-            # pos_pred = pos_pred,
-            # pos_true = data.pos,
-            # edge_index = data.edge_index, 
-            # mean = mean, 
-            # logvar = log_var, 
-            # batch = data.batch, 
-            # beta = beta) #, wait=wait ) #, tc_weight=TC_WEIGHT)
+            # Here with kl_loss we mean the total loss, which includes the mutual information and total correlation, the name is just for modularity with the simple KL divergence loss
 
-        recon_loss = advanced_reconstruction_loss(pos_pred, data.pos, data.edge_index, data.batch, align_coords=ALIGN_RECONS_LOSS)
+            wait = epoch < wait_epochs  # If we are waiting for the beta annealing to start, set wait to True
+            if AE:
+                total_loss, recon_loss, kl_sep, tc_loss, mi_loss = torch.tensor(0), torch.tensor(0), torch.tensor(0), torch.tensor(0), torch.tensor(0) 
+                total_loss = advanced_reconstruction_loss(pos_pred, data.pos, data.edge_index, data.batch, align_coords=ALIGN_RECONS_LOSS)
+                total_loss = recon_loss
+            
+            elif FREEZE_EXCEPT_LOGVAR:
+                # In this mode, we only compute KL divergence
+              
+                _, _, kl_sep, tc_loss, mi_loss = compute_tc_vae_loss(
+                    pos_pred=pos_pred,
+                    pos_true=data.pos,
+                    edge_index=data.edge_index, 
+                    mean=mean, 
+                    logvar=log_var, 
+                    batch=data.batch, 
+                    beta=beta
+                    )
+                kl_loss = kl_sep + tc_loss + mi_loss
+                recon_loss = torch.tensor(0)
 
-        tc_vae_loss = recon_loss
+            else:
+                total_loss, recon_loss, kl_sep, tc_loss, mi_loss = compute_tc_vae_loss(
+                    pos_pred=pos_pred,
+                    pos_true=data.pos,
+                    edge_index=data.edge_index, 
+                    mean=mean, 
+                    logvar=log_var, 
+                    batch=data.batch, 
+                    beta=beta,
+                    tc_weight=tc_weight,
+                    mi_weight=mi_weight,
+                    dkl_weight=dkl_weight
+                    )
+            
+            #Check if the losses are finite
+            if not torch.isfinite(total_loss):
+                print(f"Warning: tc_vae_loss is not finite. exiting the training loop.")
+                print(f"tc_vae_loss: {total_loss}, recon_loss: {recon_loss}, kl_sep: {kl_sep}, tc_loss: {tc_loss}, mi_loss: {mi_loss}")
+                break   
+            if not torch.isfinite(kl_sep):
+                print(f"Warning: kl_sep is not finite. exiting the training loop.")
+                print(f"tc_vae_loss: {total_loss}, recon_loss: {recon_loss}, kl_sep: {kl_sep}, tc_loss: {tc_loss}, mi_loss: {mi_loss}")
+                break
+            if not torch.isfinite(tc_loss):
+                print(f"Warning: tc_loss is not finite. exiting the training loop.")
+                print(f"tc_vae_loss: {total_loss}, recon_loss: {recon_loss}, kl_sep: {kl_sep}, tc_loss: {tc_loss}, mi_loss: {mi_loss}")
+                break
+            if not torch.isfinite(mi_loss):
+                print(f"Warning: mi_loss is not finite. exiting the training loop.")
+                print(f"tc_vae_loss: {total_loss}, recon_loss: {recon_loss}, kl_sep: {kl_sep}, tc_loss: {tc_loss}, mi_loss: {mi_loss}")
+                break
+            if not torch.isfinite(recon_loss):
+                print(f"Warning: recon_loss is not finite. exiting the training loop.")
+                print(f"tc_vae_loss: {total_loss}, recon_loss: {recon_loss}, kl_sep: {kl_sep}, tc_loss: {tc_loss}, mi_loss: {mi_loss}")
+                break
 
-        # Check if the losses are finite
-        # if not torch.isfinite(tc_vae_loss):
-        #     print(f"Warning: tc_vae_loss is not finite. exiting the training loop.")
-        #     print(f"tc_vae_loss: {tc_vae_loss}, recon_loss: {recon_loss}, kl_sep: {kl_sep}, tc_loss: {tc_loss}, mi_loss: {mi_loss}")
-        #     break   
-        # if not torch.isfinite(recon_loss):
-        #     print(f"Warning: recon_loss is not finite. exiting the training loop.")
-        #     print(f"tc_vae_loss: {tc_vae_loss}, recon_loss: {recon_loss}, kl_sep: {kl_sep}, tc_loss: {tc_loss}, mi_loss: {mi_loss}")
-        #     break
-        # if not torch.isfinite(kl_sep):
-        #     print(f"Warning: kl_sep is not finite. exiting the training loop.")
-        #     print(f"tc_vae_loss: {tc_vae_loss}, recon_loss: {recon_loss}, kl_sep: {kl_sep}, tc_loss: {tc_loss}, mi_loss: {mi_loss}")
-        #     break
-        # if not torch.isfinite(tc_loss):
-        #     print(f"Warning: tc_loss is not finite. exiting the training loop.")
-        #     print(f"tc_vae_loss: {tc_vae_loss}, recon_loss: {recon_loss}, kl_sep: {kl_sep}, tc_loss: {tc_loss}, mi_loss: {mi_loss}")
-        #     break
-        # if not torch.isfinite(mi_loss):
-        #     print(f"Warning: mi_loss is not finite. exiting the training loop.")
-        #     print(f"tc_vae_loss: {tc_vae_loss}, recon_loss: {recon_loss}, kl_sep: {kl_sep}, tc_loss: {tc_loss}, mi_loss: {mi_loss}")
-        #     break
 
-    
         if USE_FORCE_FIELD and lambda_energy > 0:
             # 2. Compute improved physics loss
             if SCALE_POSITIONS:
@@ -529,46 +613,76 @@ for epoch in range(STARTING_EPOCH, STARTING_EPOCH + EPOCHS):
                 use_angle=USE_ANGLE_FF,
                 use_lj=USE_LJ_FF) 
 
-            total_loss = tc_vae_loss + lambda_energy * phys_loss
+            total_loss = total_loss + lambda_energy * phys_loss
 
-        else:
-            # Use the TC-VAE loss directly if no force field is used
-            total_loss = tc_vae_loss
+       
 
-        # Clip gradients
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0, error_if_nonfinite=True)
-
+       
         total_loss.backward()
+
+        mean_grad = model.encoder.to_latent_mean.weight.grad # keep for tracking exploding gradients
+        if weight_mean_debug or debug:
+           
+            if mean_grad is not None:
+                print(f"  -> Mean Grad Norm: {mean_grad.norm().item():.6f}")
+            else:
+                print("  -> Mean Grad is None!")
+
+
+
+
+         # Clip gradients
+        #torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0, error_if_nonfinite=False)
+
         optimizer.step()
 
+        if not advanced_kl_loss:
+            # set zero tensors 
+            tc_loss = torch.tensor(0.0, device=device)
+            mi_loss = torch.tensor(0.0, device=device)
+            kl_sep = kl_loss  # In this case, kl_sep is the same as kl_loss
+
         # Accumulate losses (ensure all are scalars)
-        train_loss += total_loss.item()
-        train_tc_loss += tc_loss.item()
-        train_mi_loss += mi_loss.item()
-        train_kl_loss += kl_sep.item()
+        train_loss += total_loss.item() 
+        if advanced_kl_loss:
+            train_tc_loss += tc_loss.item()
+            train_mi_loss += mi_loss.item()
+        
+        train_kl_sep_loss += kl_sep.item()
+          
+        
+       
         train_recon_loss += recon_loss.item()
         if USE_FORCE_FIELD and lambda_energy > 0:
             train_force_loss += phys_loss.item()
+
+
+        kl_item = kl_loss.item() if not advanced_kl_loss else kl_sep.item()
 
         # Update progress bar
         if USE_FORCE_FIELD and lambda_energy > 0:
             train_pbar.set_postfix(
                 loss=total_loss.item(),
                 recon_loss=recon_loss.item(),
-                kl_loss=kl_sep.item(),
-                mi_loss=mi_loss.item(),
-                tc_loss=tc_loss.item(),
+                kl_loss=kl_item,
+                # mi_loss=mi_loss.item(),
+                # tc_loss=tc_loss.item(),
+                mean=torch.mean(mean).item(), 
+                logvar=torch.mean(log_var).item(), 
                 force_loss=phys_loss.item(),
                 beta=beta,
                 lambda_energy=lambda_energy               
             )
         else:
             train_pbar.set_postfix(
+                mean_grad=mean_grad.norm().item(),
                 loss=total_loss.item(),
                 recon_loss=recon_loss.item(),
                 kl_loss=kl_sep.item(),
-                mi_loss=mi_loss.item(),
-                tc_loss=tc_loss.item(),
+                # mi_loss=mi_loss.item(),
+                # tc_loss=tc_loss.item(),
+                mean=torch.mean(mean).item(),
+                logvar=torch.mean(log_var).item(),
                 beta=beta
                
             )
@@ -577,16 +691,19 @@ for epoch in range(STARTING_EPOCH, STARTING_EPOCH + EPOCHS):
   
     # Average the losses
     train_loss /= len(train_loader)
-    train_kl_loss /= len(train_loader)
+    
+    train_kl_sep_loss /= len(train_loader)
     train_recon_loss /= len(train_loader)
     train_mi_loss /= len(train_loader)
     train_tc_loss /= len(train_loader)
 
     if USE_FORCE_FIELD and lambda_energy > 0:
         train_force_loss /= len(train_loader)
-        print(f"Epoch {epoch+1}/{STARTING_EPOCH+EPOCHS}, Train Loss: {train_loss:.4f}, KL Loss: {train_kl_loss:.2e}, TC_loss: {train_tc_loss:.2e}, MI_loss: {train_mi_loss:.2e}, Recon Loss: {train_recon_loss:.2e}, Force Loss: {train_force_loss:.2e}")
+        print(f"Epoch {epoch+1}/{STARTING_EPOCH+EPOCHS}, Train Loss: {train_loss:.4f}, KL Loss: {train_kl_sep_loss:.2e}, TC_loss: {train_tc_loss:.2e}, MI_loss: {train_mi_loss:.2e}, Recon Loss: {train_recon_loss:.2e}, Force Loss: {train_force_loss:.2e}")
+        if ENCODER_TYPE == 'denoise':
+            print(f"Noise Level: {noise:.4f}")
     else:
-        print(f"Epoch {epoch+1}/{STARTING_EPOCH+EPOCHS}, Train Loss: {train_loss:.4f}, KL Loss: {train_kl_loss:.2e}, TC_loss: {train_tc_loss:.2e}, MI_loss: {train_mi_loss:.2e}, Recon Loss: {train_recon_loss:.2e}")
+        print(f"Epoch {epoch+1}/{STARTING_EPOCH+EPOCHS}, Train Loss: {train_loss:.4f}, KL Loss: {train_kl_sep_loss:.2e}, TC_loss: {train_tc_loss:.2e}, MI_loss: {train_mi_loss:.2e}, Recon Loss: {train_recon_loss:.2e}")
 
     if USE_SCHEDULER:
         scheduler.step(train_loss)
@@ -624,7 +741,7 @@ for epoch in range(STARTING_EPOCH, STARTING_EPOCH + EPOCHS):
             if advanced_recon_loss:
                 recon_loss = advanced_reconstruction_loss(pos_pred, data.pos, data.edge_index, data.batch, align_coords=ALIGN_RECONS_LOSS) 
             else:
-                recon_loss = reconstruction_loss(pos_pred, data.pos, data.edge_index, data.batch, align=ALIGN_RECONS_LOSS)
+                recon_loss = reconstruction_loss(pos_pred, data.pos, data.batch, align=ALIGN_RECONS_LOSS)
 
             # Base validation loss
             if kl_loss < MIN_KL:
@@ -640,23 +757,19 @@ for epoch in range(STARTING_EPOCH, STARTING_EPOCH + EPOCHS):
                         rescaled_pred_coords = pos_pred * max_positions 
                     else:
                         rescaled_pred_coords = pos_pred
-                    
-                    # Use the same physics_loss function as in training
-                    physics_loss_val = physics_loss(
-                        physics_critic, 
-                        rescaled_pred_coords, 
-                        data.batch, 
-                        use_log=USE_LOG_FF, 
-                        use_bonded=USE_BOND_FF, 
-                        use_angle=USE_ANGLE_FF, 
-                        use_lj=USE_LJ_FF
-                    )
-                    
+
+                    physics_los_vals, bond_e, angle_e, lj_e = physics_loss(
+                            physics_critic, 
+                            rescaled_pred_coords, 
+                            data.batch, 
+                            use_log=USE_LOG_FF,
+                            use_bonded=USE_BOND_FF,
+                            use_angle=USE_ANGLE_FF,
+                            use_lj=USE_LJ_FF) 
+
                     if not physics_loss_val.isnan().any():
                         total_loss += lambda_energy * physics_loss_val
-                    else:
-                        physics_loss_val = torch.tensor(0.0, device=device)
-                        
+
                 except Exception as e:
                     print(f"Error in validation physics loss: {e}")
                     physics_loss_val = torch.tensor(0.0, device=device)
@@ -666,7 +779,7 @@ for epoch in range(STARTING_EPOCH, STARTING_EPOCH + EPOCHS):
             val_kl_loss += kl_loss.item()
             val_recon_loss += recon_loss.item()
             if USE_FORCE_FIELD and lambda_energy > 0:
-                val_force_loss += physics_loss_val.item()
+                val_force_loss += physics_loss_val #.item()
 
     # Average validation losses
     val_loss /= len(val_loader)

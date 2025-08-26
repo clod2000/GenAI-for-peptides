@@ -1,7 +1,6 @@
 import torch
 import MDAnalysis as mda
 from torch_geometric.data import Data, InMemoryDataset
-import numpy as np
 
 import torch_geometric as pyg
 import torch._numpy as np
@@ -87,16 +86,28 @@ class EGNN_Encoder(nn.Module):
         self.noise_level = noise_level
         self.edge_dim = edge_dim
 
+        self.num_pairs = (num_nodes * (num_nodes - 1)) // 2  # Number of unique pairs for distance embedding
 
-        self.project = nn.Linear(in_channels, hidden_channels_egnn) # Initial projection to hidden channels
-        
+
+        self.feature_project = nn.Linear(in_channels, hidden_channels_egnn) # Initial projection to hidden channels
+ #       
+        # self.latent_projection = nn.Sequential(
+        #     nn.Linear(out_channels_egnn, out_channels_egnn),
+        #     nn.LayerNorm(out_channels_egnn),
+        #     nn.LeakyReLU(),
+        # )
+
+        # Here I try with a more rich latent projection, using cat instead of sum
         self.latent_projection = nn.Sequential(
-            nn.Linear(out_channels_egnn, out_channels_egnn),
+            nn.Linear(2*out_channels_egnn, out_channels_egnn),
             nn.LayerNorm(out_channels_egnn),
-            nn.LeakyReLU(),
-        )
+            nn.SiLU(),
+            nn.Linear(out_channels_egnn, out_channels_egnn)
+        )  
+
+
         self.egnn = EGNN(
-            in_node_nf=in_channels,
+            in_node_nf=hidden_channels_egnn,
             hidden_nf=hidden_channels_egnn,
             out_node_nf=out_channels_egnn,
             in_edge_nf=edge_dim if edge_dim is not None else 0,  # Edge features if provided
@@ -109,20 +120,43 @@ class EGNN_Encoder(nn.Module):
         # Pooling layer to get graph-level embedding
         self.pool = global_mean_pool # Or global_add_pool, etc.
 
-        if self.architecture == 'hybrid_displacement':
-            # MLP that process the flattened, centered coordinates
-            self.pos_processor = nn.Sequential(
-                nn.Linear(3, pos_projection_dim // 2), # Project each coordinate
-                nn.ReLU(),
-                nn.Linear(pos_projection_dim // 2, pos_projection_dim)
-            )
-            # The final FC layers take input from both pooled features AND pooled positions
-            self.fc_mean = nn.Linear(out_channels_egnn + pos_projection_dim, latent_dim)
-            self.fc_log_var = nn.Linear(out_channels_egnn + pos_projection_dim, latent_dim)
-        else: # Original architecture
-            self.fc_mean = nn.Linear(out_channels_egnn, latent_dim)
-            self.fc_log_var = nn.Linear(out_channels_egnn, latent_dim)
+        # if self.architecture == 'hybrid_displacement':
+        #     # MLP that process the flattened, centered coordinates
+        pos_projection_dim = self.out_channels_egnn
+
+        self.pos_processor = nn.Sequential(
+            nn.Linear(self.num_pairs, min(1024, self.num_pairs)), # Project each coordinate
+            nn.LayerNorm(min(1024, self.num_pairs)),
+            nn.SiLU(),
+            nn.Linear(min(1024, self.num_pairs), min(512, self.num_pairs//2)),
+            nn.LayerNorm(min(512, self.num_pairs//2)),
+            nn.SiLU(),
+            nn.Linear(min(512, self.num_pairs//2), min(256, self.num_pairs//4)),
+            nn.LayerNorm(min(256, self.num_pairs//4)),
+            nn.SiLU(),
+            nn.Linear(min(256, self.num_pairs//4), pos_projection_dim),
+            nn.LayerNorm(pos_projection_dim)
+        )
+        #     # The final FC layers take input from both pooled features AND pooled positions
+        #     self.fc_mean = nn.Linear(out_channels_egnn + pos_projection_dim, latent_dim)
+        #     self.fc_log_var = nn.Linear(out_channels_egnn + pos_projection_dim, latent_dim)
+        # else: # Original architecture
+        #     # self.fc_mean = nn.Linear(out_channels_egnn, latent_dim)
+        #     # self.fc_log_var = nn.Linear(out_channels_egnn, latent_dim)
+        #     self.fc_mean = nn.Linear(out_channels_egnn, latent_dim)
+        #     self.fc_log_var = nn.Linear(out_channels_egnn, latent_dim)
+
     
+        self.to_latent_mean = nn.Linear(out_channels_egnn, latent_dim)
+        self.to_latent_logvar = nn.Linear(out_channels_egnn, latent_dim)
+           
+
+
+        nn.init.xavier_normal_(self.to_latent_mean.weight, gain=1.0)  # Standard gain
+        nn.init.zeros_(self.to_latent_mean.bias)
+        nn.init.xavier_normal_(self.to_latent_logvar.weight, gain=1.0)
+        nn.init.zeros_(self.to_latent_logvar.bias)  # Start with neutral variance
+
         if verbose:
             print(f"Encoder initialized with in_channels={in_channels}, hidden_channels_egnn={hidden_channels_egnn}, "
                   f"out_channels_egnn={out_channels_egnn}, num_egnn_layers={num_egnn_layers}, latent_dim={latent_dim}")
@@ -165,45 +199,122 @@ class EGNN_Encoder(nn.Module):
                 mean (torch.Tensor): Mean of the latent space distribution.
                 log_var (torch.Tensor): Log variance of the latent space distribution.
         """
-        
-        h = x # Initial node features
-
+  
         if self.mode == 'denoise':
             # Add Gaussian noise to the positions for denoising autoencoder
-            p = pos + torch.randn_like(pos) * self.noise_level
-        else:
-            p = pos
+            pos = pos + torch.randn_like(pos) * self.noise_level
+      
 
-        h_enc, p_enc = self.egnn(h, p, edges=edge_index, edge_attr=edge_attr)
+        # Project initial node features to hidden dimension
+        h = self.feature_project(x)  # [num_nodes, hidden_channels_egnn]
 
-        graph_embedding_h = self.pool(h_enc, batch)
+        h_enc, p_enc = self.egnn(h, pos, edges=edge_index, edge_attr=edge_attr)
 
-        # --- ARCHITECTURE-SPECIFIC FORWARD PASS ---
-        if self.architecture == 'hybrid_displacement':
-            # 1. Center the coordinates to make them translation-invariant
-            p_enc_centered = p_enc - self.pool(p_enc, batch).repeat_interleave(torch.bincount(batch), dim=0)
+        graph_embedding_h = self.pool(h_enc, batch) # [batch_size, out_channels_egnn]
+        #print(f"graph_embedding_h stats: min={graph_embedding_h.min():.6f}, max={graph_embedding_h.max():.6f}, mean={graph_embedding_h.mean():.6f}")
+        #print(f"graph_embedding_h shape: {graph_embedding_h.shape}")
 
-            # 2. Process each node's centered coordinate vector
-            pos_features = self.pos_processor(p_enc_centered)
+        # Calculate rotation-invariant pairwise distances
+        batch_size = batch.max().item() + 1 if batch is not None else 1
+        distance_embeddings = []
 
-            # 3. Pool the coordinate features to get a fixed-size graph representation
-            graph_embedding_p = self.pool(pos_features, batch)
+        for i in range(batch_size):
+            mask = batch == i
+            pos_i = p_enc[mask]  # [num_nodes_in_graph_i, 3]
             
-            # 4. Concatenate feature embedding and position embedding
-            final_graph_embedding = torch.cat([graph_embedding_h, graph_embedding_p], dim=1)
-        else: # Original architecture
-            final_graph_embedding = graph_embedding_h
+            # Calculate pairwise distances
+            dist_matrix = torch.cdist(pos_i, pos_i)  # [num_nodes, num_nodes]
+             # Extract upper triangular part (without diagonal) - these are all unique distances
+            triu_indices = torch.triu_indices(dist_matrix.size(0), dist_matrix.size(1), offset=1)
+            distances = dist_matrix[triu_indices[0], triu_indices[1]]  # [num_pairs]
 
+            distance_embeddings.append(distances)  # This is ok only because all graphs have the same number of nodes
+
+        distance_embeddings = torch.stack(distance_embeddings)  # [batch_size, num_pairs (1326 for 52 nodes)]
+        #print(f"distance_embeddings stats: min={distance_embeddings.min():.6f}, max={distance_embeddings.max():.6f}, mean={distance_embeddings.mean():.6f}")
+        #print(f"distance_embeddings shape: {distance_embeddings.shape}")
+        graph_embedding_p = self.pos_processor(distance_embeddings)  # [batch_size, out_dim]
+
+        #print(f"graph_embedding_p shape: {graph_embedding_p.shape}")
+
+        # This is not rotation invariant!
+        # p_enc_centered = p_enc - self.pool(p_enc, batch).repeat_interleave(torch.bincount(batch), dim=0)
+        # pos_features = self.pos_processor(p_enc_centered)
+
+
+        # # 3. Pool the coordinate features to get a fixed-size graph representation
+        # graph_embedding_p = self.pool(pos_features, batch) # [batch_size, out_channels_egnn]
+
+        #print(f"graph_embedding_h shape: {graph_embedding_h.shape}, graph_embedding_p shape: {graph_embedding_p.shape}")
+
+        # 4. Concatenate feature embedding and position embedding
+        #final_graph_embedding = graph_embedding_h + graph_embedding_p 
+        final_graph_embedding = torch.cat([graph_embedding_h, graph_embedding_p], dim=-1)
         final_graph_embedding = self.latent_projection(final_graph_embedding)
 
         # Calculate latent space parameters from the final embedding
-        mean = self.fc_mean(final_graph_embedding)
-        log_var = self.fc_log_var(final_graph_embedding)
+        mean = self.to_latent_mean(final_graph_embedding)
+        log_var = self.to_latent_logvar(final_graph_embedding)
 
         if analyze:            
             return h_enc, p_enc, final_graph_embedding, mean, log_var
         else:
             return mean, log_var
+    
+    
+
+class FiLMLayer(nn.Module):
+    """A robust FiLM layer with proper initialization and gamma bounding."""
+    def __init__(self, input_dim, condition_dim, debug=False):
+
+        super().__init__()
+        # It's often better to have separate linear layers for gamma and beta
+        # to allow independent initialization and bounding.
+
+        self.debug = debug
+
+        self.gamma_generator = nn.Linear(condition_dim, input_dim)
+        self.beta_generator = nn.Linear(condition_dim, input_dim)
+
+        # Initialize gamma_generator to produce values that, when exponentiated, are close to 1.
+        # A common way is to initialize weights to small values and bias to 0.
+        # This makes exp(output) start near exp(0) = 1.
+        nn.init.constant_(self.gamma_generator.weight, 0.) # Small weights
+        nn.init.constant_(self.gamma_generator.bias, 0.)   # Bias to 0 for exp(0) = 1
+
+        # Initialize beta_generator to produce values close to 0.
+        nn.init.constant_(self.beta_generator.weight, 0.)
+        nn.init.constant_(self.beta_generator.bias, 0.)
+
+    def forward(self, x, z):
+        # Generate raw gamma_logit and beta_raw from the latent vector z
+        gamma_logit = self.gamma_generator(z)
+        beta_raw = self.beta_generator(z)
+
+        # Transform gamma_logit using exponential to ensure positive scale.
+        # Clamp logit to prevent extreme exp() values.
+        # (e.g., -5 to 5 maps exp to ~0.006 to 148, which is a good range)
+        gamma = torch.exp(gamma_logit.clamp(min=-5., max=5.)) # Ensure gamma is positive and bounded
+
+        if self.debug:
+            print(f"  -> Gamma Logit Stats: min={gamma_logit.min():.6f}, max={gamma_logit.max():.6f}, mean={gamma_logit.mean():.6f}")
+            print(f"  -> Gamma Stats: min={gamma.min():.6f}, max={gamma.max():.6f}, mean={gamma.mean():.6f}")
+
+        # Beta (shift) is usually not bounded, but can be if prone to explosion
+        # (e.g., beta = beta_raw.tanh() * max_beta_amplitude)
+        beta = beta_raw # Typically left unbounded, relying on learning stability
+
+        if self.debug:
+            print(f"  -> Beta Raw Stats: min={beta_raw.min():.6f}, max={beta_raw.max():.6f}, mean={beta_raw.mean():.6f}")
+            print(f"  -> Beta Stats: min={beta.min():.6f}, max={beta.max():.6f}, mean={beta.mean():.6f}")
+
+        # Unsqueeze for broadcasting with node features (B, N, D)
+        #gamma = gamma.unsqueeze(1) # Shape: [B, 1, D]
+        #beta = beta.unsqueeze(1)   # Shape: [B, 1, D]
+        
+        return x * gamma + beta
+    
+
 
 
 
@@ -240,30 +351,57 @@ class EGNN_Decoder(nn.Module):
         self.architecture = architecture
         self.edge_dim = edge_dim 
         self.latent_dim = latent_dim
+        hidden_channels = hidden_nf
 
-        self.map_latent = nn.Linear(latent_dim, hidden_nf)  # Project latent vector to hidden dimension
+        #self.map_latent = nn.Linear(latent_dim, hidden_nf)  # Project latent vector to hidden dimension
+         # --- Use FiLM for stronger conditioning ---
+        self.film_conditioner = FiLMLayer(hidden_channels, latent_dim)
+        
+        self.map_initial_features = nn.Linear(node_feature_dim_initial, hidden_channels)
+        
+        # --- 1. A much more robust initial position generator ---
+        self.map_initial_pos = nn.Sequential(
+            nn.LayerNorm(hidden_channels),
+            nn.Linear(hidden_channels, hidden_channels),
+            nn.SiLU(),
+            nn.Linear(hidden_channels, 3),
+            nn.Tanh() # CRITICAL: Prevents coordinate collapse by bounding output
+            # Tanh could limit to much the coordinates excursion, I try to leave them unbounded
+            # It's better so leave it that way 
+        )
 
-        self.map_initial_node = nn.Linear(node_feature_dim_initial, hidden_nf)
+        self.egnn_decoder = EGNN(
+            in_node_nf=hidden_channels,  # Takes concatenated features
+            hidden_nf=hidden_nf,
+            out_node_nf=hidden_nf,
+            n_layers=num_egnn_layers,
+            in_edge_nf=self.edge_dim if self.edge_dim is not None else 0,  # Edge features if provided
+            device=self.device,
+            attention=attention,  # Use attention mechanism if specified
+            tanh=tanh,  # Use tanh activation if specified
+            normalize=normalize,  # Normalize coordinates if specified
+        )
+
 
         # --- ARCHITECTURE-SPECIFIC LAYERS ---
-        if self.architecture == 'hybrid_displacement':
-            # This EGNN is conditioned by the latent vector.
+        # if self.architecture == 'hybrid_displacement':
+        #     # This EGNN is conditioned by the latent vector.
 
  
-            self.egnn_decoder = EGNN(
-                in_node_nf=hidden_nf, # Takes concatenated features
-                hidden_nf=hidden_nf,
-                out_node_nf=hidden_nf,
-                n_layers=num_egnn_layers,
-                in_edge_nf=self.edge_dim if self.edge_dim is not None else 0,  # Edge features if provided
-                device=self.device,
-                attention=attention,  # Use attention mechanism if specified
-                tanh=tanh,  # Use tanh activation if specified
-                normalize=normalize,  # Normalize coordinates if specified
-                #node_attr_d=self.latent_dim  # Node attributes dimension
-            )
+        #     self.egnn_decoder = EGNN(
+        #         in_node_nf=hidden_nf, # Takes concatenated features
+        #         hidden_nf=hidden_nf,
+        #         out_node_nf=hidden_nf,
+        #         n_layers=num_egnn_layers,
+        #         in_edge_nf=self.edge_dim if self.edge_dim is not None else 0,  # Edge features if provided
+        #         device=self.device,
+        #         attention=attention,  # Use attention mechanism if specified
+        #         tanh=tanh,  # Use tanh activation if specified
+        #         normalize=normalize,  # Normalize coordinates if specified
+        #         #node_attr_d=self.latent_dim  # Node attributes dimension
+        #     )
             
-        else: # Original architecture
+        # else: # Original architecture
 
             # self.initial_pos_MLP = nn.Sequential(
             #     nn.Linear(node_feature_dim_initial, pos_MLP_size[0]),
@@ -274,20 +412,20 @@ class EGNN_Decoder(nn.Module):
             #     nn.LeakyReLU(),
             #     nn.Linear(pos_MLP_size[2], out_coord_dim)  # Final output dimension for positions
             # )
-            self.initial_pos_MLP = nn.Linear(hidden_nf, out_coord_dim)  # Initial position MLP
+            # self.initial_pos_MLP = nn.Linear(hidden_nf, out_coord_dim)  # Initial position MLP
 
-            self.egnn_decoder = EGNN(
-                in_node_nf=node_feature_dim_initial,  # Input to EGNN layers
-                hidden_nf=hidden_nf,
-                out_node_nf=hidden_nf, # Output features from EGNN
-                in_edge_nf=self.edge_dim if self.edge_dim is not None else 0,  # Edge features if provided
-                n_layers=num_egnn_layers,
-                device=self.device,
-                attention=attention,  # Use attention mechanism if specified
-                tanh=tanh,  # Use tanh activation if specified
-                normalize=normalize,  # Normalize coordinates if specified
-                #node_attr_d=self.latent_dim  # Node attributes dimension
-            )
+            # self.egnn_decoder = EGNN(
+            #     in_node_nf=node_feature_dim_initial,  # Input to EGNN layers
+            #     hidden_nf=hidden_nf,
+            #     out_node_nf=hidden_nf, # Output features from EGNN
+            #     in_edge_nf=self.edge_dim if self.edge_dim is not None else 0,  # Edge features if provided
+            #     n_layers=num_egnn_layers,
+            #     device=self.device,
+            #     attention=attention,  # Use attention mechanism if specified
+            #     tanh=tanh,  # Use tanh activation if specified
+            #     normalize=normalize,  # Normalize coordinates if specified
+            #     #node_attr_d=self.latent_dim  # Node attributes dimension
+            # )
 
         if verbose:
 
@@ -341,63 +479,66 @@ class EGNN_Decoder(nn.Module):
             # if pos_ref.dim() == 1:
             #     pos_ref = pos_ref.repeat(num_graphs_in_batch, 1)
             # 1. Project initial features to the hidden dimension
-            h = self.map_initial_node(x_initial_features)
+            # h = self.map_initial_node(x_initial_features)
 
-            z_mapped = self.map_latent(z)
-            z_conditioning = z_mapped[batch]
-            h_conditioned = h + z_conditioning
+            # z_mapped = self.map_latent(z)
+            # z_conditioning = z_mapped[batch]
+            # h_conditioned = h + z_conditioning
 
-            h_decoded, pos_decoded = self.egnn_decoder(h_conditioned, pos_ref, edge_index, edge_attr=edge_attr)
+            # h_decoded, pos_decoded = self.egnn_decoder(h_conditioned, pos_ref, edge_index, edge_attr=edge_attr)
+
+            z_repeated = z[batch]  # [N, latent_dim]
+
+            h_initial = self.map_initial_features(x_initial_features)  # Project initial features to hidden dimension
+            h_conditioned = self.film_conditioner(h_initial, z_repeated)  # Condition initial features with FiLM
+
+            pos_initial = pos_ref  # Use provided reference positions directly
+
+            h_decoded, pos_decoded = self.egnn_decoder(h_conditioned, pos_initial, edge_index, edge_attr=edge_attr) #, node_attr=z_repeated)
+
+
+
 
         else: # Original architecture
 
             z_repeated = z[batch]  # [N, latent_dim]
 
-            h = self.map_initial_node(x_initial_features)  # Project to EGNN's input feature dimension
+            #h= self.map_initial_node(x_initial_features)  # Project to EGNN's input feature dimension
 
-            z_features = self.map_latent(z_repeated)  # Project latent vector to hidden dimension
+            h_initial = self.map_initial_features(x_initial_features)  # Project initial features to hidden dimension
+            #print(f"z_repeated shape: {z_repeated.shape}, h_initial shape: {h_initial.shape}, edge_index shape: {edge_index.shape}, edge_attr shape: {edge_attr.shape if edge_attr is not None else 'None'}")
+            h_conditioned = self.film_conditioner(h_initial, z_repeated)  # Condition initial
 
-            h = h + z_features  # Condition initial features with latent vector
-           
-            #pos_cat = torch.cat([x_initial_features, z_repeated], dim=1) # [N, node_feature_dim_initial + latent_dim]
-            
-            pos_cat = x_initial_features  # [N, node_feature_dim_initial] - no latent vector concatenation in original architecture
+            # z_features = self.map_latent(z_repeated)  # Project latent vector to hidden dimension
 
-             # the cat with initial features is to ensure that the initial position are at least slightly different for each node
-            latent_pos = self.initial_pos_MLP(z_features+h) # Initial positions from latent vector [N, 3]
-              
-             # 1. Repeat z for every node
-            #z_repeated = z[batch]
+            # h = h + z_features  # Condition initial features with latent vector
 
-            # 2. Create base node features from input and from latent vector
-            #h_initial = self.map_initial_node(x_initial_features)
-            #z_features = self.map_latent(z_repeated)
+            # pos_cat = torch.cat([x_initial_features, z_repeated], dim=1) # [N, node_feature_dim_initial + latent_dim]
 
-            # 3. Condition the node features on z. This is the main information stream.
-            #h = h_initial# + z_features
+            # pos_cat = x_initial_features  # [N, node_feature_dim_initial] - no latent vector concatenation in original architecture
 
-            # 4. Generate initial positions *directly from the conditioned features h*.
-            #    This creates a clean, serial flow of information: z -> h -> pos
-            #latent_pos = self.initial_pos_MLP(x_initial_features)
-              
-            # 5. Run the EGNN decoder, which refines the initial positions based on message passing
-            #    that also uses the z-conditioned features 'h'.
-            
+            # the cat with initial features is to ensure that the initial position are at least slightly different for each node
+            # latent_pos = self.initial_pos_MLP(z_features+h) # Initial positions from latent vector [N, 3]
+
+            pos_initial = self.map_initial_pos(h_conditioned)  # Generate initial positions from conditioned features [N, 3]
+
             # Check if all positions are identical
-            if torch.allclose(latent_pos, latent_pos[0:1].expand_as(latent_pos), atol=1e-6):
-               print("WARNING: All generated positions are identical!")
+            # if torch.allclose(latent_pos, latent_pos[0:1].expand_as(latent_pos), atol=1e-6):
+            #    print("WARNING: All generated positions are identical!")
+
+            #print(f"pos_initial shape: {pos_initial.shape}, h_conditioned shape: {h_conditioned.shape}, edge_index shape: {edge_index.shape}, edge_attr shape: {edge_attr.shape if edge_attr is not None else 'None'}") 
         
             # Run EGNN decoder
-            h_decoded, pos_decoded = self.egnn_decoder(x_initial_features, latent_pos, edge_index, edge_attr=edge_attr) #, node_attr=z_repeated)
+            h_decoded, pos_decoded = self.egnn_decoder(h_conditioned, pos_initial, edge_index, edge_attr=edge_attr) #, node_attr=z_repeated)
 
         if analyze:
-            return pos_decoded, h_decoded, h_conditioned, latent_pos, h, z_repeated
+            return pos_decoded, h_decoded, h_conditioned, pos_initial, h, z_repeated
         else:
             return pos_decoded
-    
+        
 
 class FGVAE(nn.Module):
-    def __init__(self, encoder, decoder):
+    def __init__(self, encoder, decoder, AE = False):
         """
         Initializes the FGVAE model with an encoder and decoder.
         Args:
@@ -407,6 +548,7 @@ class FGVAE(nn.Module):
         super(FGVAE, self).__init__()
         self.encoder = encoder
         self.decoder = decoder
+        self.AE = AE
 
     def reparameterize(self, mean, log_var):
         """
@@ -421,7 +563,7 @@ class FGVAE(nn.Module):
         eps = torch.randn_like(std)
         return mean + eps * std
 
-    def forward(self, data, pos_ref=None, analyze=False):
+    def forward(self, data, pos_ref=None, analyze=False, new_noise_level=None):
         """
         Forward pass of the FGVAE model.
         Args:
@@ -443,7 +585,7 @@ class FGVAE(nn.Module):
             if not hasattr(self.encoder, 'analyze') or not hasattr(self.decoder, 'analyze'):
                 raise ValueError("Encoder and Decoder must have 'analyze' option for analysis mode.")
 
-            h_enc, p_enc, graph_embedding, mean, log_var = self.encoder(x, pos, edge_index, batch, edge_attr=edge_attr, analyze=True)
+            h_enc, p_enc, graph_embedding, mean, log_var = self.encoder(x, pos, edge_index, batch, edge_attr=edge_attr, analyze=True, new_noise_level=new_noise_level)
             # Reparameterize
             z = self.reparameterize(mean, log_var)
             # Decode with analysis
@@ -455,9 +597,14 @@ class FGVAE(nn.Module):
             mean, log_var = self.encoder(x, pos, edge_index, batch= batch, edge_attr=edge_attr)
 
             # Reparameterize
-            #z = self.reparameterize(mean, log_var)
-            z = mean # TEMPORARY CHECK
+            #print("log_var before clamping:", log_var)
+            log_var = log_var.clamp(min=-10, max=10)  # Clamp log_var to avoid numerical issues
 
+            if self.AE:
+                z = mean
+            else:
+                z = self.reparameterize(mean, log_var)
+           
             # Decode
             pos_pred = self.decoder(z, x, edge_index, pos_ref=pos_ref, batch=batch, edge_attr=edge_attr)
 
@@ -485,3 +632,49 @@ class FGVAE(nn.Module):
 
         return pos_pred
     
+
+
+# class MLP_decoder(nn.Module):
+#     # this module should learn to decode the distance matrix in order to be invariant to rotations and translations
+
+#     def __init__(self, latent_dim , hidden_dim, output_dim, num_layers= 3, normalize = False):
+#         super(MLP_decoder, self).__init__()
+#         self.MLP = nn.ModuleList()
+
+#         for ind in range(num_layers):
+#             if ind == 0:
+#                 self.MLP.append(nn.Linear(latent_dim, hidden_dim))
+#                 if normalize:
+#                     self.MLP.append(nn.LayerNorm(hidden_dim))
+#             elif ind == num_layers - 1:
+#                 self.MLP.append(nn.Linear(hidden_dim, output_dim)
+#             else:
+#                 self.MLP.append(nn.Linear(hidden_dim, hidden_dim))
+#                 if normalize:
+#                     self.MLP.append(nn.LayerNorm(hidden_dim))
+
+#     # The output is the distance matrix, I need then to convert it to coordinates
+#     def distance_matrix_to_coordinates(self, distance_matrix):
+#         # starting point is x,y,z = 0,0,0
+#         batch_size = distance_matrix.shape[0]
+#         coordinates = torch.zeros(batch_size, 3, device=distance_matrix.device)
+
+#         for i in range(batch_size):
+#             coords = self._distance_matrix_to_coordinates_single(distance_matrix[i])
+#             coordinates[i] = coords
+
+#         return coordinates
+
+#     def _distance_matrix_to_coordinates_single(self, distance_matrix):
+#         num_points = distance_matrix.shape[0]
+#         coords = torch.zeros((num_points, 3), device=distance_matrix.device)
+
+      
+#     def forward(self, z):
+#         # z is a batched tensor of shape (batch_size, latent_dim)
+    
+#         for layer in self.MLP:
+#             z = layer(z)
+#             z = F.leaky_relu(z)
+#         return z
+

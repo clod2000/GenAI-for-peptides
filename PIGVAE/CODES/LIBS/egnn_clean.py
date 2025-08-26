@@ -6,7 +6,7 @@
 
 # I'VE MODIFIED THE CODE TO OBTAIN A BIGGER GAIN FRON THE WEIGHT INITIALIZATION IN ORDER TO UPDATE THE COORDINATES
 
-GAIN = 1.4142135623730951  # sqrt(2) for xavier_uniform initialization
+GAIN = 0.1 #1.4142135623730951  # sqrt(2) for xavier_uniform initialization
 
 
 

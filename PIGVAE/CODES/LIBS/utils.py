@@ -205,140 +205,6 @@ def get_dataset(root_dir = None,
     
     return dataset
 
-def create_physics_informed_dataset(dataset: InMemoryDataset, physics_critic) -> InMemoryDataset:
-    """
-    Enriches a PyTorch Geometric dataset with physics-based features.
-
-    This function performs two main operations:
-    1.  Appends Lennard-Jones parameters (sigma, epsilon) to the node features (`data.x`).
-    2.  Creates bond parameters (r0, k_bond) as new edge attributes (`data.edge_attr`).
-
-    Args:
-        dataset (InMemoryDataset): The input dataset to be enriched. Assumes all graphs
-                                   share the same topology and node feature matrix before enrichment.
-        physics_critic (EnergyCalculator): An instantiated EnergyCalculator object that has
-                                           already parsed the PDB/topology and contains the
-                                           bond and Lennard-Jones parameters.
-
-    Returns:
-        InMemoryDataset: A new dataset where each Data object contains the updated
-                         node features and new edge attributes.
-    """
-    print("Creating a physics-informed dataset...")
-
-    # === Step 1: Prepare Node-Level Lennard-Jones Features ===
-    print("  - Preparing Lennard-Jones node features (sigma, epsilon)...")
-    sigma_list = physics_critic.sigma_list
-    epsilon_list = physics_critic.epsilon_list
-    lj_features = torch.tensor(
-        list(zip(sigma_list, epsilon_list)),
-        dtype=torch.float32
-    )
-
-    # Assume original features are constant across the dataset
-    original_features = dataset[0].x
-    # New feature matrix by concatenating original features with LJ parameters
-    new_node_features = torch.cat([original_features, lj_features], dim=1)
-
-    # === Step 2: Prepare Edge-Level Bond Features ===
-    print("  - Preparing bond edge attributes (r0, k_bond)...")
-    # Create an efficient lookup dictionary: { (atom1, atom2): [r0, k] }
-    bond_params_lookup = {}
-    for i, bond_indices in enumerate(physics_critic.bonds):
-        p1, p2 = bond_indices
-        key = tuple(sorted((p1, p2)))  # Canonical key for undirected edges
-        r0 = physics_critic.r0_list[i]
-        k = physics_critic.k_list[i]
-        bond_params_lookup[key] = [r0, k]
-
-    # Create the edge_attr tensor. Assumes constant topology.
-    # We only need to do this once.
-    edge_index = dataset[0].edge_index
-    edge_attributes_list = []
-    for j in range(edge_index.size(1)):
-        u, v = edge_index[:, j].tolist()
-        key = tuple(sorted((u, v)))
-        # Default to [0, 0] if a graph edge is not in our physics topology (e.g., H-bonds)
-        params = bond_params_lookup.get(key, [0.0, 0.0])
-        edge_attributes_list.append(params)
-    
-    new_edge_attributes = torch.tensor(edge_attributes_list, dtype=torch.float32)
-
-    # === Step 3: Build the New Dataset ===
-    print("  - Assembling the new dataset...")
-    new_data_list = []
-    for data in tqdm(dataset, desc="Updating graphs"):
-        # Create a new Data object with the enriched features.
-        # This is safer than modifying the original data objects in place.
-        new_data = Data(
-            x=new_node_features,
-            edge_index=data.edge_index,
-            pos=data.pos,
-            edge_attr=new_edge_attributes # All graphs share this
-        )
-        # Copy over any other attributes that might exist
-        for key, value in data:
-            if key not in ['x', 'edge_index', 'pos', 'edge_attr']:
-                new_data[key] = value
-        
-        new_data_list.append(new_data)
-
-    # === Step 4: Collate into a final InMemoryDataset ===
-    final_dataset = InMemoryDataset(root=dataset.root, transform=None)
-    final_dataset.data, final_dataset.slices = final_dataset.collate(new_data_list)
-    
-    print("Physics-informed dataset created successfully!")
-    print(f"  - New node feature dimension: {final_dataset[0].num_features}")
-    print(f"  - New edge attribute dimension: {final_dataset[0].edge_attr.shape[1]}")
-    
-    return final_dataset
-
-
-def add_physics_attributes_to_dataset(dataset, physics_critic):
-    """
-    Adds bond parameters (r0, k) as edge attributes to each graph in the dataset.
-
-    This function iterates through the dataset, and for each graph, it creates
-    an `edge_attr` tensor where each row corresponds to an edge in `edge_index`
-    and contains the physical parameters for that bond.
-    """
-    print("Adding physics parameters as edge attributes...")
-
-    # Step 1: Create a lookup dictionary for efficient parameter access.
-    # The key is a sorted tuple of atom indices for a bond.
-    bond_params_lookup = {}
-    for i, bond_indices in enumerate(physics_critic.bonds):
-        p1, p2 = bond_indices
-        key = tuple(sorted((p1, p2))) # Use a sorted tuple to handle undirected edges
-        r0 = physics_critic.r0_list[i]
-        k = physics_critic.k_list[i]
-        bond_params_lookup[key] = [r0, k]
-
-    # Step 2: Iterate through each graph and build its edge_attr tensor.
-    new_data_list = []
-    for i, data in enumerate(tqdm(dataset, desc="Processing graphs")):
-        edge_attributes = []
-        for j in range(data.edge_index.size(1)):
-            u, v = data.edge_index[:, j].tolist()
-            key = tuple(sorted((u, v)))
-
-            # Get the parameters for this specific edge.
-            # If an edge exists in the graph but not the topology, use defaults.
-            params = bond_params_lookup.get(key, [0.0, 0.0])
-            edge_attributes.append(params)
-
-        # Create the final tensor and add it to the data object.
-        data.edge_attr = torch.tensor(edge_attributes, dtype=torch.float32)
-        new_data_list.append(data)
-
-    # Re-collate the dataset with the new attribute
-    new_dataset = InMemoryDataset(root=dataset.root, transform=None)
-    new_dataset.data, new_dataset.slices = new_dataset.collate(new_data_list)
-    
-    print(f"Finished. Edge attributes added with shape: {new_dataset[0].edge_attr.shape}")
-    return new_dataset
-
-
 
 def find_rigid_alignment(source,target, check_reflection=True):
 
@@ -669,86 +535,6 @@ def bond_angle_loss(pos_pred, pos_true, edge_index):
     
     return bond_loss  # + angle_loss
 
-def bond_loss(pos_pred, pos_true, edge_index):
-    """Calculates the MSE loss for bond lengths."""
-    sender, receiver = edge_index
-    
-    true_bonds = pos_true[sender] - pos_true[receiver]
-    pred_bonds = pos_pred[sender] - pos_pred[receiver]
-    
-    true_lengths = torch.norm(true_bonds, dim=-1)
-    pred_lengths = torch.norm(pred_bonds, dim=-1)
-    
-    return F.mse_loss(pred_lengths, true_lengths)
-
-
-def angle_loss(pos_pred: torch.Tensor, pos_true: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
-    """
-    Computes the Mean Squared Error of the cosines of bond angles in a highly efficient manner.
-
-    This function first identifies all angle triplets (i-j-k) from the edge_index,
-    then calculates the cosine of the angle for each triplet in a fully vectorized
-    way for both predicted and true positions. Using the cosine is more numerically
-    stable than calculating the angle itself.
-
-    Args:
-        pos_pred (torch.Tensor): The predicted atom positions. Shape: [num_atoms, 3].
-        pos_true (torch.Tensor): The ground truth atom positions. Shape: [num_atoms, 3].
-        edge_index (torch.Tensor): The graph's edge index (connectivity). Shape: [2, num_edges].
-
-    Returns:
-        torch.Tensor: A single scalar tensor representing the mean squared error of the angle cosines.
-    """
-    num_atoms = pos_true.size(0)
-
-    # 1. Efficiently find all unique angle triplets (i, j, k) where j is the central atom.
-    # We build an adjacency list to find all neighbors for each central atom.
-    adj_list = [[] for _ in range(num_atoms)]
-    for i_node, j_node in edge_index.t().tolist():
-        adj_list[j_node].append(i_node) # Build list of neighbors for each node
-
-    triplets = []
-    for j_node, neighbors in enumerate(adj_list):
-        # An angle can only be formed if a node is connected to at least two other nodes.
-        if len(neighbors) < 2:
-            continue
-        # Create all unique combinations of two neighbors for the central node j.
-        for i_node, k_node in itertools.combinations(neighbors, 2):
-            triplets.append([i_node, j_node, k_node])
-
-    # If no angles are found in the topology (e.g., a diatomic molecule), return zero loss.
-    if not triplets:
-        return torch.tensor(0.0, device=pos_pred.device, dtype=pos_pred.dtype)
-
-    # Convert the list of triplets to a tensor for advanced indexing.
-    triplets = torch.tensor(triplets, dtype=torch.long, device=pos_pred.device)
-    i, j, k = triplets[:, 0], triplets[:, 1], triplets[:, 2]
-
-    # 2. Use advanced indexing to gather all atomic positions for the triplets at once.
-    pos_true_i, pos_true_j, pos_true_k = pos_true[i], pos_true[j], pos_true[k]
-    pos_pred_i, pos_pred_j, pos_pred_k = pos_pred[i], pos_pred[j], pos_pred[k]
-
-    # 3. Calculate the two bond vectors for each angle, originating from the central atom j.
-    # This is fully vectorized.
-    vec_ji_true = pos_true_i - pos_true_j
-    vec_jk_true = pos_true_k - pos_true_j
-    
-    vec_ji_pred = pos_pred_i - pos_pred_j
-    vec_jk_pred = pos_pred_k - pos_pred_j
-
-    # 4. Calculate the cosine of the angle between the vectors.
-    # cos(theta) = (A . B) / (||A|| * ||B||)
-    # By normalizing the vectors first, this simplifies to the dot product.
-    # F.normalize is numerically stable.
-    cos_angle_true = torch.sum(F.normalize(vec_ji_true, p=2, dim=-1) * F.normalize(vec_jk_true, p=2, dim=-1), dim=-1)
-    cos_angle_pred = torch.sum(F.normalize(vec_ji_pred, p=2, dim=-1) * F.normalize(vec_jk_pred, p=2, dim=-1), dim=-1)
-
-    # 5. Compute the Mean Squared Error between the cosines.
-    # We clamp the true value to handle any potential floating-point inaccuracies.
-    loss = F.mse_loss(cos_angle_pred, torch.clamp(cos_angle_true, -1.0, 1.0))
-
-    return loss
-
 def advanced_reconstruction_loss(pos_pred, pos_true, edge_index, batch, align_coords=True):
     """
     Comprehensive loss function that properly handles alignment requirements
@@ -760,8 +546,7 @@ def advanced_reconstruction_loss(pos_pred, pos_true, edge_index, batch, align_co
     dist_loss = distance_matrix_loss(pos_pred, pos_true, batch)
     
     # 3. Bond/angle loss - inherently alignment-invariant
-    structure_loss = bond_loss(pos_pred, pos_true, edge_index) + angle_loss(pos_pred, pos_true, edge_index)
-     #bond_angle_loss(pos_pred, pos_true, edge_index)
+    structure_loss = bond_angle_loss(pos_pred, pos_true, edge_index)
     
     # Combine with weights
     return 0.2 * coord_loss + 0.5 * dist_loss + 0.3 * structure_loss
@@ -1092,14 +877,8 @@ def analyze_reconstruction_quality(model, test_loader, device, file_path, physic
     worst_sample = all_samples[-1]
     
     # Save PDBs (convert to Angstrom)
-    try: 
-        save_trajectory_as_pdb([s['true_coords_nm'] * 10 for s in [best_sample, worst_sample]], ref_pdb, f"{file_path}/reconstruction_true_best_worst.pdb")
-    except Exception as e:
-        print(f"Error saving true coordinates PDB: {e}")
-    try:
-        save_trajectory_as_pdb([s['pred_coords_nm'] * 10 for s in [best_sample, worst_sample]], ref_pdb, f"{file_path}/reconstruction_pred_best_worst.pdb")
-    except Exception as e:
-        print(f"Error saving predicted coordinates PDB: {e}")
+    save_trajectory_as_pdb([s['true_coords_nm'] * 10 for s in [best_sample, worst_sample]], ref_pdb, f"{file_path}/reconstruction_true_best_worst.pdb")
+    save_trajectory_as_pdb([s['pred_coords_nm'] * 10 for s in [best_sample, worst_sample]], ref_pdb, f"{file_path}/reconstruction_pred_best_worst.pdb")
 
     # Plot best reconstruction
     fig = plt.figure(figsize=(10, 8))
@@ -1122,8 +901,9 @@ def analyze_latent_space(model, dataloader, device, file_path, physics_critic, s
     with torch.no_grad():
         for data in tqdm(dataloader, desc="Analyzing Latent Space", leave=False):
             data = data.to(device)
-            edge_att = data.edge_attr if hasattr(data, 'edge_attr') else None
-            mean, _ = model.encoder(data.x, data.pos, data.edge_index, data.batch, edge_attr=edge_att)
+            edge_attr = data.edge_attr if hasattr(data, 'edge_attr') else None
+
+            mean, _ = model.encoder(data.x, data.pos, data.edge_index, data.batch, edge_attr=edge_attr)
             latent_vectors.append(mean.cpu())
             
             if scale_pos:
@@ -1178,8 +958,8 @@ def analyze_generation_and_energy(model, test_loader, device, file_path, physics
     with torch.no_grad():
         for _ in tqdm(range(n_generate), desc="Generating New Structures", leave=False):
             z = torch.randn(1, model.encoder.latent_dim, device=device)
-            edge_att = data_sample.edge_attr if hasattr(data_sample, 'edge_attr') else None
-            pos_pred_scaled = model.decoder(z, data_sample.x, data_sample.edge_index, data_sample.batch, pos_ref=pos_ref, edge_attr=edge_att)
+            edge_attr = data_sample.edge_attr if hasattr(data_sample, 'edge_attr') else None
+            pos_pred_scaled = model.decoder(z, data_sample.x, data_sample.edge_index, data_sample.batch, pos_ref=pos_ref, edge_attr=edge_attr)
 
             if scale_pos:
                 generated_coords_nm = pos_pred_scaled * max_pos
@@ -1222,19 +1002,16 @@ def analyze_interpolation(model, test_loader, device, file_path, pos_ref, ref_pd
     else:
         batch = data1.batch
 
-    edge_att_1 = data1.edge_attr if hasattr(data1, 'edge_attr') else None
-    edge_att_2 = data2.edge_attr if hasattr(data2, 'edge_attr') else None
-
     interp_coords_angstrom = []
     with torch.no_grad():
-        z1, _ = model.encoder(data1.x, data1.pos, data1.edge_index, batch, edge_attr=edge_att_1)
-        z2, _ = model.encoder(data2.x, data2.pos, data2.edge_index, batch, edge_attr=edge_att_2)
+        z1, _ = model.encoder(data1.x, data1.pos, data1.edge_index, batch, edge_attr=data1.edge_attr)
+        z2, _ = model.encoder(data2.x, data2.pos, data2.edge_index, batch, edge_attr=data2.edge_attr)
 
         z_interp = [torch.lerp(z1, z2, t) for t in np.linspace(0, 1, n_steps)]
 
 
         for z in tqdm(z_interp, desc="Analyzing Interpolation", leave=False):
-            pos_pred_scaled = model.decoder(z, data1.x, data1.edge_index, batch, pos_ref=pos_ref, edge_attr=edge_att_1)
+            pos_pred_scaled = model.decoder(z, data1.x, data1.edge_index, batch, pos_ref=pos_ref, edge_attr=data1.edge_attr)
             if scale_pos:
                 pos_pred_nm = pos_pred_scaled * max_pos
             else:
@@ -1288,320 +1065,22 @@ def run_full_analysis(model, test_loader, device, file_path, config, physics_cri
         if verbose: print("Skipping analysis that requires a force field (energy, etc.).")
     else:
         if verbose: print("1. Analyzing reconstruction quality...")
-        try:
-            analyze_reconstruction_quality(model, test_loader, device, analysis_path, physics_critic, pos_ref, scale_pos, max_positions, ref_pdb, num_samples=len(test_loader), verbose=verbose)
-        except Exception as e:
-            print(f"Error occurred during reconstruction quality analysis: {e}")
+        analyze_reconstruction_quality(model, test_loader, device, analysis_path, physics_critic, pos_ref, scale_pos, max_positions, ref_pdb, num_samples=len(test_loader), verbose=verbose)
 
         if verbose: print("\n2. Analyzing latent space...")
-        try:
-            analyze_latent_space(model, test_loader, device, analysis_path, physics_critic, scale_pos, max_positions, verbose=verbose)
-        except Exception as e:
-            print(f"Error occurred during latent space analysis: {e}")
+        analyze_latent_space(model, test_loader, device, analysis_path, physics_critic, scale_pos, max_positions,verbose=verbose)
 
         if verbose: print("\n3. Analyzing generation and energy distribution...")
-        try:
-            analyze_generation_and_energy(model, test_loader, device, analysis_path, physics_critic, pos_ref, scale_pos, max_positions, ref_pdb, n_generate=len(test_loader.dataset), verbose=verbose)
-        except Exception as e:
-            print(f"Error occurred during generation and energy distribution analysis: {e}")
+        analyze_generation_and_energy(model, test_loader, device, analysis_path, physics_critic, pos_ref, scale_pos, max_positions, ref_pdb, n_generate=len(test_loader.dataset), verbose=verbose)
 
     if verbose: print("\n4. Analyzing latent space interpolation...")
-    try:
-        analyze_interpolation(model, test_loader, device, analysis_path, pos_ref, ref_pdb, scale_pos, max_positions, n_steps=30, verbose=verbose)
-    except Exception as e:
-        print(f"Error occurred during latent space interpolation analysis: {e}")
+    analyze_interpolation(model, test_loader, device, analysis_path, pos_ref, ref_pdb, scale_pos, max_positions, n_steps=30, verbose=verbose)
 
     if verbose: print("\n" + "="*20 + " ANALYSIS COMPLETE " + "="*20)
     if verbose: print(f"Results saved in: {analysis_path}")
 
 
 
-######### to be revised and understood #########
-
-# def compute_tc_vae_loss(x_pred, x_true, edge_index, mean, logvar, batch, beta=1.0, tc_weight=1.0):
-#     """
-#     Compute the β-TCVAE loss with decomposed KL terms
-    
-#     Args:
-#         x_pred: Reconstructed data
-#         x_true: Original data  
-#         mean: Encoder mean output
-#         logvar: Encoder log variance output
-#         batch: Batch indices
-#         beta: Overall KL weight (like your existing BETA parameter)
-#         tc_weight: Weight for total correlation term
-#     """
-#     # Reconstruction loss (same as before)
-#     recon_loss = advanced_reconstruction_loss(x_pred, x_true, edge_index, batch)
-
-#     # Standard KL - ensure this is calculated properly
-#     kl_divergence = -0.5 * torch.sum(1 + logvar - mean.pow(2) - logvar.exp(), dim=1).mean()
-    
-#     # Calculate decomposed KL terms
-#     # Instead of complex MC estimation, use simple approximation for stability
-#     batch_size = mean.size(0)
-#     latent_dim = mean.size(1)
-    
-#     # 1. Total correlation approximation (how much dims depend on each other)
-#     z = reparameterize(mean, logvar)
-#     log_qz_mean = gaussian_log_density(z, mean, logvar)  # [B]
-
-#     # Mean across batch dimension for each latent dim
-#     mean_mean = mean.mean(dim=0, keepdim=True)  # [1, D]
-#     mean_logvar = torch.log(torch.exp(logvar).mean(dim=0, keepdim=True))  # [1, D]
-    
-#     # Compute log q(z) - approximate marginalization  
-#     log_qz_marginal = gaussian_log_density(z, mean_mean, mean_logvar)  # [B]
-    
-#     # TC loss with proper scaling
-#     tc_loss = (log_qz_mean.mean() - log_qz_marginal.mean()) * latent_dim / batch_size
-#     tc_loss = torch.clamp(tc_loss, min=0.0)
-    
-#     # 2. Dimension-wise KL
-#     log_pz = log_standard_normal(z)  # log p(z) under standard normal prior
-#     dkl = torch.clamp(log_qz_marginal.mean() - log_pz.mean(), min=0.0)
-    
-#     # 3. Mutual information (index-code MI)
-#     mi_loss = torch.clamp(log_qz_mean.mean() - log_qz_marginal.mean(), min=0.0)
-    
-#     # Properly scaled loss
-#     mi_weight = 1 # 0.1  # Scale down the huge MI values you're seeing
-#     vae_loss = recon_loss + beta * (mi_weight * mi_loss + tc_weight * tc_loss + dkl)
-    
-#     return vae_loss, recon_loss,mi_loss,tc_loss, dkl
-
-# def gaussian_log_density(x, mean, logvar):
-#     """Compute log density of Gaussian with given mean and logvar at x"""
-#     return -0.5 * (np.log(2 * np.pi) + logvar + (x - mean).pow(2) / torch.exp(logvar))
-
-
-
-
-#     # Sample from the posterior q(z|x)
-#     z = reparameterize(mean, logvar)
-    
-#     # Calculate log q(z|x)
-#     log_q_zx = log_normal_pdf(z, mean, logvar)
-    
-#     # Calculate log q(z) - marginal encoding distribution
-#     # Use Monte Carlo approximation across batch
-#     batch_size = mean.size(0)
-#     _logqz = log_normal_pdf(z.unsqueeze(1), mean.unsqueeze(0), logvar.unsqueeze(0))
-#     # Logsumexp trick for numerical stability
-#     log_q_z = torch.logsumexp(_logqz.sum(dim=2), dim=1) - np.log(batch_size)
-    
-#     # Calculate log p(z) - prior
-#     log_p_z = log_standard_normal(z)
-    
-#     # Calculate decomposed KL terms
-#     kl_sep = log_q_zx - log_p_z  # Dimension-wise KL
-#     mi_loss = (log_q_zx.mean() - log_q_z.mean())  # Mutual information
-#     tc_loss = (log_q_z.mean() - log_p_z.mean())  # Total correlation
-    
-#     # Weighted loss
-#     vae_loss = recon_loss + beta * (mi_loss + tc_weight * tc_loss + kl_sep.mean())
-    
-#     return vae_loss, recon_loss, mi_loss, tc_loss, kl_sep.mean()
-
-# Helper functions
-def log_normal_pdf(x, mean, logvar):
-    const = torch.log(torch.tensor(2. * np.pi))
-    return -.5 * (const + logvar + (x - mean).pow(2) / torch.exp(logvar))
-
-def log_standard_normal(x):
-    const = torch.log(torch.tensor(2. * np.pi))
-    return -.5 * (const + x.pow(2))
-
-def reparameterize(mean, logvar):
-    std = torch.exp(0.5 * logvar)
-    eps = torch.randn_like(std)
-    return mean + eps * std
-
-
-def improved_physics_loss(energy_calculator, pos_pred, batch, mean, logvar, use_log=True):
-    """
-    Improved physics loss with adaptive weighting and distribution-awareness
-    
-    Args:
-        energy_calculator: Your EnergyCalculator object
-        pos_pred: Predicted positions
-        batch: Batch indices
-        mean, logvar: Latent distribution parameters
-    """
-    # Get latent space statistics
-    z_var = torch.exp(logvar)
-    z_var_mean = z_var.mean(dim=1, keepdim=True)
-    
-    # Calculate directional variance to detect collapse
-    latent_cov = torch.matmul(mean.unsqueeze(2), mean.unsqueeze(1))
-    directional_var = torch.diagonal(latent_cov, dim1=1, dim2=2).mean(dim=1)
-    
-    # Calculate standard physics components
-    bond_energy, angle_energy, lj_energy = 0.0, 0.0, 0.0
-    total_loss = 0.0
-    num_graphs = batch.max().item() + 1
-    
-    for i in range(num_graphs):
-        # Standard physics calculations
-        mask = batch == i
-        coords = pos_pred[mask]
-        
-        # Calculate per-graph latent statistics
-        graph_z_var = z_var[i]
-        graph_dir_var = directional_var[i]
-        
-        # Calculate energy components
-        bond_e, angle_e, lj_e = energy_calculator(coords)
-        
-        # ---- Key Improvement: Adaptive weighting ----
-        # Scale physics weight inversely with latent variance
-        # This encourages exploration when the model is uncertain
-        adaptive_scale = torch.sigmoid(5.0 - 10.0 * graph_z_var.mean())
-        
-        # Balance components dynamically
-        # Bonds are most critical, then angles, then LJ
-        bond_weight = 5.0 * adaptive_scale
-        angle_weight = 2.0 * adaptive_scale 
-        lj_weight = 0.01 * adaptive_scale
-        
-        # Apply weights
-        physics_e = (bond_weight * bond_e + 
-                     angle_weight * angle_e + 
-                     lj_weight * lj_e)
-        
-        # Apply log transform if requested (with safe min value)
-        if use_log:
-            physics_e = torch.log10(physics_e + 1e-6)
-            
-        # Add diversity bonus for high directional variance
-        # This directly counters dimensional collapse
-        diversity_bonus = 0.1 * torch.sigmoid(graph_dir_var)
-        physics_e = physics_e - diversity_bonus
-            
-        total_loss = total_loss + physics_e
-        
-        # Accumulate for reporting
-        bond_energy += bond_e
-        angle_energy += angle_e
-        lj_energy += lj_e
-    
-    # Normalize
-    if num_graphs > 0:
-        total_loss = total_loss / num_graphs
-        bond_energy /= num_graphs
-        angle_energy /= num_graphs
-        lj_energy /= num_graphs
-    
-    return total_loss, (bond_energy, angle_energy, lj_energy)
-
-
-
-# def compute_tc_vae_loss(x_pred, x_true,edge_index, mean, logvar, batch, beta=0.001, tc_weight=1.0, wait = False, 
-#                          mi_weight=0.1, dkl_weight=1.0, bandwidth=0.1, debug = False):
-#     """
-#     Complete TC-VAE loss with Monte Carlo estimation and proper scaling
-    
-#     Args:
-#         x_pred: Reconstructed data
-#         x_true: Original data
-#         mean: Encoder mean output [batch_size, latent_dim]
-#         logvar: Encoder log variance output [batch_size, latent_dim]
-#         batch: Batch indices
-#         beta: Overall KL weight
-#         tc_weight: Weight for total correlation term
-#         mi_weight: Weight for mutual information term
-#         dkl_weight: Weight for dimension-wise KL term
-#     """
-#     # 1. Advanced reconstruction loss
-#     recon_loss = advanced_reconstruction_loss(x_pred, x_true, edge_index, batch)
-
-#     if debug: print(f"Reconstruction Loss: {recon_loss.item()}")
-    
-#     if wait:
-#         return recon_loss, recon_loss,torch.tensor(0),torch.tensor(0),torch.tensor(0) # Early return if waiting for debugging
-
-
-#     # Get dimensions for scaling
-#     batch_size = mean.size(0)
-#     latent_dim = mean.size(1)
-    
-#     # 2. Sample from posterior
-#     z = reparameterize(mean, logvar)
-
-#     if debug: print(f"Sampled z shape: {z.shape}, Mean shape: {mean.shape}, Logvar shape: {logvar.shape}")
-    
-#     # 3. Calculate log q(z|x) - log probability of z under encoder
-#     log_q_zCx = log_normal_pdf(z, mean, logvar)
-
-#     if debug: print(f"log_q_zCx shape: {log_q_zCx.shape}, Mean: {log_q_zCx.mean().item()}, Std: {log_q_zCx.std().item()}")
-    
-#     # 4. Calculate log p(z) - log probability of z under prior
-#     log_p_z = log_standard_normal(z)
-
-#     if debug: print(f"log_p_z shape: {log_p_z.shape}, Mean: {log_p_z.mean().item()}, Std: {log_p_z.std().item()}")
-
-#     # 35 Calculate log q(z) using kernel density estimation
-#     # This is where we apply the kernel PDE approach
-#     log_q_z,joint_bandwidth = adaptive_kde(z)
-
-#     if debug: print(f"log_q_z shape: {log_q_z.shape}, Mean: {log_q_z.mean().item()}, Std: {log_q_z.std().item()}")
-    
-#     # 6. Calculate log q(z_i) for each dimension i
-#     log_q_z_prod = 0
-#     for i in range(latent_dim):
-#         log_q_z_i, _ = adaptive_kde(z[:, i:i+1])
-#         if log_q_z_i.isnan().any():
-#             print( "log_q_z_i IS Nan")
-#             exit(1)
-#         log_q_z_prod += log_q_z_i
-    
-#     if debug: print(f"log_q_z_prod shape: {log_q_z_prod.shape}, Mean: {log_q_z_prod.mean().item()}, Std: {log_q_z_prod.std().item()}")
-#     log_q_z_prod  = torch.clamp(log_q_z_prod, max=1e3)  # Ensure positive
-    
-#     # # 5. Monte Carlo estimation of log q(z) - marginal log probability
-#     # mat_log_qz = matrix_log_density_gaussian(z, mean, logvar)
-    
-#     # # Apply logsumexp for numerical stability and proper normalization
-#     # # This computes log q(z) ≈ log(1/N ∑_i q(z|x_i))
-#     # log_q_z = torch.logsumexp(mat_log_qz.sum(dim=2), dim=1) - np.log(batch_size)
-    
-#     # # 6. Calculate log q(z) assuming factorized distribution
-#     # # This is sum_i log q(z_i) under marginal distributions
-#     # mat_log_qz_prod = matrix_log_density_gaussian_product(z, mean, logvar)
-#     # log_q_z_prod = torch.logsumexp(mat_log_qz_prod, dim=-1) - np.log(batch_size)
-    
-#     # 7. KL Decomposition
-#     # Compute and scale terms appropriately to avoid numerical issues
-    
-#     # a. Index-code MI: I(z;x) = KL[q(z,x)||q(z)p(x)] = E_q(x)[KL[q(z|x)||q(z)]]
-#     mi_loss = (log_q_zCx - log_q_z).mean() / latent_dim
-#     mi_loss = torch.clamp(mi_loss, min=1e-8)  # Ensure positive
-    
-#     # b. Total correlation: TC(z) = KL[q(z)||∏_i q(z_i)]
-#     tc_loss = (log_q_z - log_q_z_prod).mean() / latent_dim
-#     tc_loss = torch.clamp(tc_loss, min=1e-8)  # Ensure positive
-#     tc_loss = torch.clamp(tc_loss, max=1e3)  # Ensure positive
-
-#     # c. Dimension-wise KL: ∑_i KL[q(z_i)||p(z_i)]
-#     dkl_loss = (log_q_z_prod - log_p_z).mean() / latent_dim
-#     dkl_loss = torch.clamp(dkl_loss, min=1e-8)  # Ensure positive
-    
-#     # 8. Combine with appropriate weights
-#     kl_loss = mi_weight * mi_loss + tc_weight * tc_loss + dkl_weight * dkl_loss
-    
-#     # 9. Final loss
-#     total_loss = recon_loss + beta * kl_loss
-    
-#     return total_loss, recon_loss, dkl_loss, tc_loss, mi_loss
-
-
-
-# ==============================================================================
-# PROPOSED NEW LOSS FUNCTIONS FOR Putils.py
-#
-# You should replace the existing `compute_tc_vae_loss` and its helpers
-# with the functions below.
-# ==============================================================================
 
 def compute_tc_vae_loss(pos_pred, pos_true, edge_index, mean, logvar,batch,
                         beta=1.0, tc_weight=10.0, mi_weight=1.0, dkl_weight=1.0):

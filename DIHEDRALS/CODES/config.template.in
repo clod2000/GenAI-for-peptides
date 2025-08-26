@@ -13,47 +13,57 @@
 ENCODER_TYPE = SAGE
 HIDDEN_ENCODER_CHANNELS = 128
 OUT_ENCODER_CHANNELS = 64
-NUM_ENC_LAYERS: 6
-#ATTENTION_ENCODER = True
-LATENT_DIM: 4
+NUM_ENC_LAYERS: 10
+ATTENTION_ENCODER = False
+HEADS_ENCODER = 3
+LATENT_DIM: 32
 #TANH_ENCODER =  True
-#NORMALIZE_ENCODER = True
+NORMALIZE_ENCODER = True
 
 # decoder
-HIDDEN_DECODER_CHANNELS = 128
+HIDDEN_DECODER_CHANNELS = 256
 NUM_DEC_LAYERS: 6
 #ATTENTION_DECODER = True
 #TANH_DECODER = True
 #NORMALIZE_DECODER =  True
 
 #### training parameters
-EPOCHS = 30
+EPOCHS = 500
 BATCHSIZE =  64
-LEARNING_RATE =  1E-5
+LEARNING_RATE =  1e-3
+WARMUP_EPOCHS = 0
 WEIGHT_DECAY = 0
 
 
 #### Scheduler parameters
-USE_SCHEDULER =  False
-SCHEDULER_PATIENCE =  10
-SCHEDULER_FACTOR = 0.5
+USE_SCHEDULER =  True
+SCHEDULER_PATIENCE =  15
+SCHEDULER_FACTOR = 0.8
 SCHEDULER_TYPE = ReduceLROnPlateau
 SCHEDULER_THRESHOLD =  0.0001
 
 # Beta annealing parameters
 BETA = None
-wait_epochs =  10
-annealing_epochs = 100
-beta_min = 0.00001
-beta_max = 0.001
+CYCLIC_BETA = False
+CYCLE_LENGTH = 100
+wait_epochs =  200
+annealing_epochs = 3000
+beta_min = 1e-4
+beta_max = 1e-2
+
+advanced_kl_loss = True
+tc_weight=30.0
+mi_weight = 0
+dkl_weight=1.0
+
 
 # Other parameters
-DISABLE_TQDM = False
+DISABLE_TQDM = True
 SEED =  42
-NAME_SIMULATION =  None
-NAME_FOLDER = None
-CONTINUE_FROM = None
-STARTING_EPOCH = 20
+NAME_SIMULATION = 6-SAGE-skipconnections-continues
+NAME_FOLDER = adv_kl_loss
+CONTINUE_FROM =/home/clod/Desktop/THESIS_2/DIHEDRALS/RUNS/adv_kl_loss/6-SAGE-skipconnections/model_epoch_360.pth
+STARTING_EPOCH = 360
 #TEST_MODEL = True
-MIN_KL = 0.01
+MIN_KL = 1e-4
 

@@ -1075,3 +1075,209 @@ def run_full_analysis(model, test_loader, device, file_path, config, physics_cri
 
     if verbose: print("\n" + "="*20 + " ANALYSIS COMPLETE " + "="*20)
     if verbose: print(f"Results saved in: {analysis_path}")
+
+
+
+
+def compute_tc_vae_loss(pos_pred, pos_true, edge_index, mean, logvar,batch,
+                        beta=1.0, tc_weight=10.0, mi_weight=1.0, dkl_weight=1.0):
+    """
+    Computes the beta-TCVAE loss with decomposed KL terms.
+    This implementation uses minibatch-weighted sampling for numerical stability,
+    which is generally superior to Kernel Density Estimation for this task.
+
+    Args:
+        pos_pred (torch.Tensor): Reconstructed positions from the decoder.
+        pos_true (torch.Tensor): Ground truth positions.
+        edge_index (torch.Tensor): Graph connectivity.
+        batch (torch.Tensor): Batch indices.
+        mean (torch.Tensor): Latent space mean from the encoder.
+        logvar (torch.Tensor): Latent space log-variance from the encoder.
+        beta (float): The overall weight for the KL term (annealed).
+        tc_weight (float): The specific weight for the Total Correlation term.
+        mi_weight (float): The specific weight for the Mutual Information term.
+        dkl_weight (float): The specific weight for the Dimension-wise KL term.
+
+    Returns:
+        tuple: (total_loss, recon_loss, mi_loss, tc_loss, dkl_loss)
+    """
+    # 1. Reconstruction Loss (using your advanced, alignment-invariant function)
+    recon_loss = advanced_reconstruction_loss(pos_pred, pos_true, edge_index, batch)
+
+    # Get dimensions
+    batch_size, latent_dim = mean.shape
+
+    # 2. Sample from posterior q(z|x) using the reparameterization trick
+    z = reparameterize(mean, logvar)
+
+    # 3. KL Divergence Decomposition
+    # These calculations rely on log-probabilities of z under different distributions.
+    
+    # log q(z|x) for each sample
+    log_q_z_given_x = log_normal_pdf(z, mean, logvar)
+
+    # log p(z) (prior) for each sample
+    log_p_z = log_standard_normal(z)
+    
+    # log q(z) = log [ 1/N sum_i q(z|x_i) ]
+    # This is the tricky term. We estimate it using all samples in the batch.
+    # We need to compute the log probability of each z_i under each q(z|x_j).
+    # log_q_z_matrix has shape [batch_size (for z_i), batch_size (for x_j)]
+    log_q_z_matrix = log_normal_pdf(z.unsqueeze(1), mean.unsqueeze(0), logvar.unsqueeze(0))
+    
+    # Log-sum-exp trick for numerical stability to compute log q(z)
+    log_q_z = torch.logsumexp(log_q_z_matrix, dim=1) - math.log(batch_size)
+    
+    # log prod_j q(z_j) = sum_j log q(z_j)
+    # This term is for the product of the marginals of q(z).
+    # log_q_z_prod_matrix has shape [batch_size (for z_i), batch_size (for x_j), latent_dim]
+    log_q_z_prod_matrix = log_normal_pdf(z.unsqueeze(1), mean.unsqueeze(0), logvar.unsqueeze(0), sum_dims=False)
+    # Marginalize over batch dimension, then sum over latent dimension
+    log_q_z_prod = torch.sum(torch.logsumexp(log_q_z_prod_matrix, dim=1) - math.log(batch_size), dim=1)
+
+    # Decomposed KL terms (averaged over the batch)
+    # a) Index-Code MI: I(z;x) = E[log q(z|x) - log q(z)]
+    mi_loss = (log_q_z_given_x - log_q_z).mean()
+    mi_loss = torch.clamp(mi_loss, min=1e-8)  # Ensure positive
+    
+    # b) Total Correlation: TC(z) = E[log q(z) - log prod_j q(z_j)]
+    tc_loss = (log_q_z - log_q_z_prod).mean()
+    tc_loss = torch.clamp(tc_loss, min=1e-8)  # Ensure positive
+
+    # c) Dimension-wise KL: D_KL = E[log prod_j q(z_j) - log p(z)]
+    dkl_loss = (log_q_z_prod - log_p_z).mean()
+    dkl_loss = torch.clamp(dkl_loss, min=1e-8)  # Ensure positive
+    # 4. Combine into final loss
+    kl_loss = mi_weight * mi_loss + tc_weight * tc_loss + dkl_weight * dkl_loss
+    total_loss = recon_loss + beta * kl_loss
+    
+    return total_loss, recon_loss, dkl_loss, tc_loss, mi_loss
+
+# --- Helper functions for the loss calculation ---
+
+def reparameterize(mean, logvar):
+    """Standard reparameterization trick."""
+    std = torch.exp(0.5 * logvar)
+    eps = torch.randn_like(std)
+    return mean + eps * std
+
+def log_normal_pdf(x, mean, logvar, sum_dims=True):
+    """
+    Calculates log probability of x under a normal distribution.
+    Args:
+        x, mean, logvar: Tensors of same shape.
+        sum_dims (bool): If True, sums the log probabilities over the last dimension.
+    """
+    const = -0.5 * math.log(2 * math.pi)
+    log_prob = const - 0.5 * logvar - 0.5 * ((x - mean)**2 / torch.exp(logvar))
+    if sum_dims:
+        return torch.sum(log_prob, dim=-1)
+    return log_prob
+
+def log_standard_normal(x):
+    """Calculates log probability of x under a standard normal distribution."""
+    return log_normal_pdf(x, torch.zeros_like(x), torch.zeros_like(x))
+
+
+# ==============================================================================
+# PROPOSED NEW PHYSICS LOSS FUNCTION FOR Putils.py
+# ==============================================================================
+
+def compute_physics_loss(energy_calculator, pos_pred, batch, 
+                         bond_weight=1.0, angle_weight=0.5, lj_weight=0.1, use_log=False):
+    """
+    Computes a physics-based loss using an energy calculator.
+
+    Args:
+        energy_calculator: Instantiated object that can compute energies.
+        pos_pred (torch.Tensor): Predicted positions from the decoder.
+        batch (torch.Tensor): Batch indices.
+        bond_weight (float): Weight for the bond energy term.
+        angle_weight (float): Weight for the angle energy term.
+        lj_weight (float): Weight for the Lennard-Jones (non-bonded) term.
+        use_log (bool): If True, applies a log transform to the energies to
+                        prevent extreme gradients from high-energy structures.
+
+    Returns:
+        tuple: (total_physics_loss, avg_bond_e, avg_angle_e, avg_lj_e)
+    """
+    total_loss = 0.0
+    total_bond_e, total_angle_e, total_lj_e = 0.0, 0.0, 0.0
+    num_graphs = batch.max().item() + 1
+
+    for i in range(num_graphs):
+        mask = (batch == i)
+        coords = pos_pred[mask] # Get coords for the i-th graph
+
+        # Assumes your energy_calculator returns a tuple of energies
+        bond_e, angle_e, lj_e = energy_calculator(coords)
+
+        # Log transform is crucial for stability! It punishes high energies
+        # without creating exploding gradients.
+        if use_log:
+            bond_e = torch.log1p(bond_e)
+            angle_e = torch.log1p(angle_e)
+            lj_e = torch.log1p(lj_e)
+        
+        graph_loss = (bond_weight * bond_e +
+                      angle_weight * angle_e +
+                      lj_weight * lj_e)
+        
+        total_loss += graph_loss
+        total_bond_e += bond_e
+        total_angle_e += angle_e
+        total_lj_e += lj_e
+
+    # Average over the batch
+    if num_graphs > 0:
+        total_loss /= num_graphs
+        total_bond_e /= num_graphs
+        total_angle_e /= num_graphs
+        total_lj_e /= num_graphs
+    
+    return total_loss, total_bond_e, total_angle_e, total_lj_e
+
+
+
+
+####### OTHER ANNEALING FUNCTIONS ########
+
+def cyclic_annealing(epoch, start_value=0.1, end_value=1.0, cycle_length=10):
+    """
+    Cyclic annealing function that oscillates between start_value and end_value.
+    
+    Args:
+        epoch (int): Current epoch number.
+        start_value (float): Starting value of the annealing.
+        end_value (float): Ending value of the annealing.
+        cycle_length (int): Length of one cycle in epochs.
+        
+    Returns:
+        float: Annealed value for the current epoch.
+    """
+    cycle = (epoch // cycle_length) % 2
+    if cycle == 0:
+        return start_value + (end_value - start_value) * (epoch % cycle_length) / cycle_length
+    else:
+        return end_value - (end_value - start_value) * (epoch % cycle_length) / cycle_length
+
+
+def denoise_annealing(epoch, max_epochs, start_value=0.1, end_value=1.0):
+    """
+    Denoising annealing function that decreases linearly from start_value to end_value.
+
+    Args:
+        epoch (int): Current epoch number.
+        max_epoch (int): Total number of epochs.
+        start_value (float): Starting value of the annealing.
+        end_value (float): Ending value of the annealing.   
+
+    Returns:
+        float: Annealed value for the current epoch.    
+    """
+   # first 25% of epochs, keep it constant
+    if epoch < max_epochs * 0.25:
+        return start_value
+    # next 50% of epochs, linearly decrease
+    else:
+        return start_value - (start_value - end_value) * ((epoch) / (max_epochs))

@@ -14,7 +14,8 @@
 # 'original': The initial implementation.
 # 'hybrid_displacement': The new model that uses an explicit encoder and a displacement decoder.
 
-MODEL_ARCHITECTURE = original
+MODEL_ARCHITECTURE =  original
+#original_egnn
 # hybrid_displacement
 # original
 
@@ -23,9 +24,9 @@ ENCODER_POS_PROJECTION_DIM: 8
 # ( Not used in official_egnn)
 
 ## Training type ( Not implemented yet in official_egnn)
-TRAINING_MODE = generative
+TRAINING_MODE = denoising
 # 'denoising' or 'generative', denoising adds nois to the reference position
-NOISE_LEVEL = 0.05
+NOISE_LEVEL = 0.1
 # in nm
 
 ##########################################
@@ -39,13 +40,14 @@ NOISE_LEVEL = 0.05
 ## encoder
 ENCODER_TYPE = standard
 #denoise or standard, here denoise is for the original, adds noise to encoder input pos
-NOISE_LV = 0.1
+NOISE_LV = 0.2
+NOISE_ANNEALING = True
 #standard
-HIDDEN_ENCODER_CHANNELS = 128
+HIDDEN_ENCODER_CHANNELS = 256
 OUT_ENCODER_CHANNELS = 128
-NUM_ENC_LAYERS: 6
+NUM_ENC_LAYERS: 10
 ATTENTION_ENCODER = True
-LATENT_DIM: 32
+LATENT_DIM: 128
 TANH_ENCODER =  True
 NORMALIZE_ENCODER = True
 
@@ -53,8 +55,8 @@ NORMALIZE_ENCODER = True
 MLP_DECODER_POS_SIZE = [128,128,64]
 HIDDEN_DECODER_CHANNELS = 128
 #128
-NUM_DEC_LAYERS: 6
-ATTENTION_DECODER = True
+NUM_DEC_LAYERS: 5
+ATTENTION_DECODER = False
 TANH_DECODER = True
 NORMALIZE_DECODER =  True
 
@@ -66,41 +68,49 @@ INITIAL_ALIGNMENT = False
 return_pos_angstrom = False
 
 #### training parameters
-EPOCHS = 100
-BATCHSIZE =  32
-LEARNING_RATE =  1E-6
-WARMUP_EPOCHS =  0
+EPOCHS = 50
+BATCHSIZE =  64
+LEARNING_RATE = 1E-5
+WARMUP_EPOCHS = 20
 WEIGHT_DECAY = 0
+
+
 advanced_recon_loss = True
+advanced_kl_loss = True
+
+tc_weight=10.0
+mi_weight = 0
+dkl_weight=1.0
 
 
 #### Scheduler parameters
 USE_SCHEDULER =  True
-SCHEDULER_PATIENCE =  10
+SCHEDULER_PATIENCE =  5
 SCHEDULER_FACTOR = 0.5
 SCHEDULER_TYPE = ReduceLROnPlateau
 SCHEDULER_THRESHOLD =  0.0001
 
 # Beta annealing parameters
-BETA = 0
-#None
-wait_epochs =  10
+BETA = 1e-6
+CYCLIC_BETA = False
+CYCLE_LENGTH = 10
+wait_epochs =  20
 annealing_epochs = 100
-beta_min = 1e-5
- #.0001
+beta_min = 1e-4
 beta_max = 1e-3
-MIN_KL = 0.
+MIN_KL = 1E-4
 tc_weight = 10
 
 # force field parameters
 USE_FORCE_FIELD = True
 PDB_FOR_ENERGY = ../DATA/raw/protein_only.pdb
-LAMBDA_ENERGY = 1e-2
+LAMBDA_ENERGY = 0.
+#None
 #1e-10
-wait_lambda_epochs = 50
-lambda_annealing_epochs = 50
-lambda_min = 1e-3
-lambda_max = 1e-3
+wait_lambda_epochs = 10
+lambda_annealing_epochs = 400
+lambda_min = 1e-5
+lambda_max = 1e-5
 
 USE_LOG_FF = False
 # if True, the force field loss is calculated using log scaling, otherwise it is calculated using the raw values
@@ -116,11 +126,13 @@ USE_LJ_FF = False
 # Other parameters
 DISABLE_TQDM = False
 SEED =  42
-NAME_SIMULATION = AE_angle_bonds
-NAME_FOLDER = Phase_1
-CONTINUE_FROM = /home/claudio.colturi/THESIS_2/PIGVAE/RUNS/original/Phase_0/stable_warmup_AE_1
+NAME_SIMULATION = new_pigvae
+NAME_FOLDER = updated_v2
+CONTINUE_FROM = None
+#/home/claudio.colturi/THESIS_2/PIGVAE/RUNS/original/Phase_0.1/DAE_warmup
+# /home/claudio.colturi/THESIS_2/PIGVAE/RUNS/original/Phase_2/AE_angle_bonds_lj_210/model_epoch_270.pth
 
-STARTING_EPOCH = 60
+STARTING_EPOCH =0
 ALIGN_RECONS_LOSS = True
 TEST_MODEL = True
 

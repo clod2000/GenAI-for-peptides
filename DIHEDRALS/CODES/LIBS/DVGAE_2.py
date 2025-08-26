@@ -55,95 +55,152 @@ class GCN_encoder(torch.nn.Module):
         self.linear_mu = torch.nn.Linear(hidden_channels, out_channels)
         self.linear_logstd = torch.nn.Linear(hidden_channels, out_channels)
 
-    def forward(self, x, edge_index,batch):
-        for i in range(self.num_layers - 1):
+    def forward(self, x, edge_index, batch):
+        # Apply convolution and optional attention layers
+        for i in range(self.num_layers):
+            #print(f"x_shape: {x.shape}")
             x = getattr(self, f'conv{i+1}')(x, edge_index)
-            x = torch.leaky_relu(x)
+            x = self.norm(x)
+            x = F.leaky_relu(x)
+
+            if self.attention:
+                x = getattr(self, f'attn{i+1}')(x, edge_index)
+
+        x = global_mean_pool(x, batch)  # Pool node features to get graph-level embedding
+
+        # calculate mu and logstd from the single graph-level embedding
         mu = self.linear_mu(x)
         logstd = self.linear_logstd(x)
-
-        x = global_mean_pool(x, batch) # Pool node features to get graph-level embedding
-    
+       
         return mu, logstd
-    
-
 
 class SAGE_encoder(torch.nn.Module):
     def __init__(self, in_channels, out_channels, hidden_channels, num_layers=2, attention=False, heads=1, batch_norm=False):
         super(SAGE_encoder, self).__init__()
         
-        # --- Store parameters that are needed in forward pass ---
         self.num_layers = num_layers
         self.attention = attention
         self.norm = torch.nn.BatchNorm1d(hidden_channels) if batch_norm else torch.nn.Identity()
+
+        self.skip_connection = True  # Enable skip connections 
         
-        # Initialize layers
+        # Use ModuleLists to correctly register layers
+        self.convs = torch.nn.ModuleList()
+        if attention:
+            self.attns = torch.nn.ModuleList()
+
         for i in range(num_layers):
             layer_in_channels = in_channels if i == 0 else hidden_channels
-            # Correctly handle input channels for the first layer
-            if not attention:
-                setattr(self, f'conv{i+1}', SAGEConv(layer_in_channels, hidden_channels))
-            else:
-                # The input to GATConv should be the output of SAGEConv
-                setattr(self, f'attn{i+1}', GATConv(hidden_channels, hidden_channels, heads=heads, concat=False if i != num_layers-1 else True))
+            self.convs.append(SAGEConv(layer_in_channels, hidden_channels))
 
-        # The input to these linear layers is now the pooled graph embedding
-        # If using attention with multiple heads, the dimension will be larger
+            if attention:
+                # FIX: Intermediate layers average, the FINAL layer concatenates.
+                is_final_layer = (i == num_layers - 1)
+                # The GAT layer always takes the output of the SAGE layer as input
+                self.attns.append(GATConv(hidden_channels, hidden_channels, heads=heads, concat=is_final_layer))
+
+        # FIX: The final dimension depends on whether the last GAT layer concatenated.
         final_embedding_dim = hidden_channels * heads if attention else hidden_channels
         self.linear_mu = torch.nn.Linear(final_embedding_dim, out_channels)
         self.linear_logstd = torch.nn.Linear(final_embedding_dim, out_channels)
 
-    # def forward(self, x, edge_index, batch):
-    #     # Apply convolution and optional attention layers
-    #     for i in range(self.num_layers):
-    #         #print(f"x_shape: {x.shape}")
-    #         x = getattr(self, f'conv{i+1}')(x, edge_index)
-    #         x = self.norm(x)
-    #         x = F.leaky_relu(x)
+    def forward(self, x, edge_index, batch):
+        # FIX: Implement a sequential forward pass
+        for i in range(self.num_layers):
+            x_input = x  # Store input for potential skip connection
 
-    #         if self.attention:
-    #             x = getattr(self, f'attn{i+1}')(x, edge_index)
+            # Pass the output of the previous layer as input to the current one
+            x = self.convs[i](x, edge_index)
+            
+            # Apply attention after the convolution
+            if self.attention:
+                x = self.attns[i](x, edge_index)
 
-    #     x = global_mean_pool(x, batch)  # Pool node features to get graph-level embedding
-
-    #     # calculate mu and logstd from the single graph-level embedding
-    #     mu = self.linear_mu(x)
-    #     logstd = self.linear_logstd(x)
-
-    #     return mu, logstd
-
-    # 
-def forward(self, x, edge_index, batch):
-    # Store the initial input for the first residual connection if dimensions match
-    
-    for i in range(self.num_layers):
-        x_input = x # Store the input to the current layer
+            
+            x_out = self.norm(x)
         
-        # Apply the GNN layer (using the corrected mutually exclusive logic)
-        if self.attention:
-            x_out = getattr(self, f'attn{i+1}')(x_input, edge_index)
-        else:
-            x_out = getattr(self, f'conv{i+1}')(x_input, edge_index)
+            
+            if self.skip_connection and x_input.shape == x.shape:
+                x = x_out + x_input
 
-        x_out = self.norm(x_out)
         
-        # Add the residual connection BEFORE the activation
-        # Ensure dimensions match. If not, you'd need a linear projection on x_input.
-        if x_input.shape == x_out.shape:
-             x = x_input + x_out
-        else:
-             # This can happen if the first layer changes the channel size.
-             # In that case, you might skip the residual on the first layer or project x_input.
-             x = x_out
+            else:
+                # This can happen if the first layer changes the channel size.
+                # In that case, you might skip the residual on the first layer or project x_input.
+                x = x_out
+                
+            if i < self.num_layers - 1 or not self.attention:
+                x = self.norm(x)
+                x = F.leaky_relu(x)
 
-        x = F.leaky_relu(x)
+        # Global pooling happens after all layers are done
+        x = global_mean_pool(x, batch)
 
-    x = global_mean_pool(x, batch)
-    mu = self.linear_mu(x)
-    logstd = self.linear_logstd(x)
-    return mu, logstd
+        # Calculate mu and logstd from the final graph-level embedding
+        mu = self.linear_mu(x)
+        logstd = self.linear_logstd(x)
+
+        return mu, logstd
+
+# class SAGE_encoder(torch.nn.Module):
+#     def __init__(self, in_channels, out_channels, hidden_channels, num_layers=2, attention=False, heads=1, batch_norm=False):
+#         super(SAGE_encoder, self).__init__()
+        
+#         # --- Store parameters that are needed in forward pass ---
+#         self.num_layers = num_layers
+#         self.attention = attention
+#         self.norm = torch.nn.BatchNorm1d(hidden_channels) if batch_norm else torch.nn.Identity()
+        
+#         # Initialize layers
+#         for i in range(num_layers):
+#             print(f"Initializing layer {i+1}")
+#             is_final_layer = (i == num_layers - 1)
+#             layer_in_channels = in_channels if i == 0 else hidden_channels
+#             # Correctly handle input channels for the first layer
+#             setattr(self, f'conv{i+1}', SAGEConv(layer_in_channels, hidden_channels))
+#             if attention:
+#                 # The input to GATConv should be the output of SAGEConv
+#                 setattr(self, f'attn{i+1}', GATConv(layer_in_channels, hidden_channels, heads=heads, concat= not is_final_layer))
+
+#         # The input to these linear layers is now the pooled graph embedding
+#         # If using attention with multiple heads, the dimension will be larger
+#         final_embedding_dim = hidden_channels * heads if attention else hidden_channels
+#         self.linear_mu = torch.nn.Linear(final_embedding_dim, out_channels)
+#         self.linear_logstd = torch.nn.Linear(final_embedding_dim, out_channels)
+
+#     def forward(self, x, edge_index, batch):
+#         # Apply convolution and optional attention layers
+#         for i in range(self.num_layers):
+#             # #print(f"x_shape: {x.shape}")
+#             # x = getattr(self, f'conv{i+1}')(x, edge_index)
+#             # x = self.norm(x)
+#             # x = F.leaky_relu(x)
+
+#             # if self.attention:
+#             #     x = getattr(self, f'attn{i+1}')(x, edge_index)
+#             x_input = x
+#             # Calculate SAGE and GAT in parallel
+#             x_from_sage = getattr(self, f'conv{i+1}')(x_input, edge_index)
+#             if self.attention:
+#                 x_from_gat = getattr(self, f'attn{i+1}')(x_input, edge_index)
+            
+#         if self.attention: 
+#             x = x_from_sage + x_from_gat
+#         else:
+#             x = x_from_sage
 
 
+#             # Combine their outputs by adding them
+#         x = F.leaky_relu(self.norm(x))
+        
+
+#         x = global_mean_pool(x, batch)  # Pool node features to get graph-level embedding
+
+#         # calculate mu and logstd from the single graph-level embedding
+#         mu = self.linear_mu(x)
+#         logstd = self.linear_logstd(x)
+
+#         return mu, logstd
 
 
 class MLP_Decoder(torch.nn.Module):
@@ -154,6 +211,8 @@ class MLP_Decoder(torch.nn.Module):
         self.out_features = out_features
         self.hidden_channels = hidden_channels
         self.num_layers = num_layers
+
+        self.skip_connections = True
 
         layers = []
         layers.append(torch.nn.Linear(latent_dim, hidden_channels))
