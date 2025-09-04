@@ -115,12 +115,11 @@ USE_LJ_FF = False
 # Other parameters
 DISABLE_TQDM = False
 SEED =  42
-NAME_SIMULATION = adv_rec_loss_ls_16
+NAME_SIMULATION = adv_recon_loss_denoise_ls_16_continues
 #bonds_angle_lj_210
 NAME_FOLDER = meeting
-CONTINUE_FROM = None 
-#/home/clod/Desktop/THESIS_2/FULL_ATOM/RUNS/original/meeting/adv_rec_loss-continues/model_epoch_60.pth
-STARTING_EPOCH = 60
+CONTINUE_FROM =/home/clod/Desktop/THESIS_2/FULL_ATOM/RUNS/original/meeting/adv_recon_loss_denoise_ls_16/model_epoch_10.pth
+STARTING_EPOCH = 10
 ALIGN_RECONS_LOSS = True
 TEST_MODEL = True
 MIN_KL = 0.01

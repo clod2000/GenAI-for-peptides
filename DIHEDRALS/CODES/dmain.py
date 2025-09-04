@@ -160,10 +160,12 @@ out_channels = dataset[0].num_nodes
 if verbose: print(f"Output channels: {out_channels}")
 
 
-if  ENCODER_TYPE == 'SAGE':
-    encoder = SAGE_encoder(inchannels, LATENT_DIM, HIDDEN_ENCODER_CHANNELS, num_layers=NUM_ENC_LAYERS, attention=ATTENTION_ENCODER, heads=HEADS_ENCODER)
-else:   
-    encoder = GCN_encoder(inchannels, LATENT_DIM, HIDDEN_ENCODER_CHANNELS, num_layers=NUM_ENC_LAYERS, attention=ATTENTION_ENCODER, heads=HEADS_ENCODER)
+# if  ENCODER_TYPE == 'SAGE':
+#     encoder = SAGE_encoder(inchannels, LATENT_DIM, HIDDEN_ENCODER_CHANNELS, num_layers=NUM_ENC_LAYERS, attention=ATTENTION_ENCODER, heads=HEADS_ENCODER)
+# else:   
+#     encoder = GCN_encoder(inchannels, LATENT_DIM, HIDDEN_ENCODER_CHANNELS, num_layers=NUM_ENC_LAYERS, attention=ATTENTION_ENCODER, heads=HEADS_ENCODER)
+
+encoder = encoder(inchannels, LATENT_DIM, HIDDEN_ENCODER_CHANNELS, enc_type=ENCODER_TYPE, num_layers=NUM_ENC_LAYERS, attention=ATTENTION_ENCODER, heads=HEADS_ENCODER)
 
 decoder = MLP_Decoder(LATENT_DIM, out_channels, dataset.num_features, HIDDEN_DECODER_CHANNELS, num_layers=NUM_DEC_LAYERS)
 

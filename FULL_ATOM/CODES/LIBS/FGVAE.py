@@ -99,7 +99,8 @@ class EGNN_Encoder(nn.Module):
         # Pooling layer to get graph-level embedding
         self.pool = global_mean_pool # Or global_add_pool, etc.
 
-        if self.architecture == 'hybrid_displacement':
+        #if self.architecture == 'hybrid_displacement':
+        if False:
             # MLP that process the flattened, centered coordinates
             self.pos_processor = nn.Sequential(
                 nn.Linear(3, pos_projection_dim // 2), # Project each coordinate

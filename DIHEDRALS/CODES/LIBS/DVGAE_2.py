@@ -140,7 +140,74 @@ class SAGE_encoder(torch.nn.Module):
         mu = self.linear_mu(x)
         logstd = self.linear_logstd(x)
 
+        return mu, 
+
+        mu = self.linear_mu(x)
+        logstd = self.linear_logstd(x)
+       
         return mu, logstd
+
+class encoder(torch.nn.Module):
+    def __init__(self, in_channels, out_channels, hidden_channels, enc_type = 'SAGE', num_layers=2, attention=False, heads=1, batch_norm=False):
+        super(encoder, self).__init__()
+        
+        self.num_layers = num_layers
+        self.norm = torch.nn.BatchNorm1d(hidden_channels) if batch_norm else torch.nn.Identity()
+
+        self.skip_connection = True  # Enable skip connections 
+        
+        # Use ModuleLists to correctly register layers
+        self.convs = torch.nn.ModuleList()
+      
+        for i in range(num_layers):
+            layer_in_channels = in_channels if i == 0 else hidden_channels
+            if enc_type == 'GCN':
+                self.convs.append(GCNConv(layer_in_channels, hidden_channels))
+            elif enc_type == 'SAGE':
+                self.convs.append(SAGEConv(layer_in_channels, hidden_channels))
+            elif enc_type == 'GAT':
+                self.convs.append(GATConv(layer_in_channels, hidden_channels, heads=heads, concat=(i == num_layers - 1)))
+            else:
+                raise ValueError(f"Unknown encoder type: {enc_type}")
+
+    
+        # FIX: The final dimension depends on whether the last GAT layer concatenated.
+        final_embedding_dim = hidden_channels * heads if enc_type == 'GAT'else hidden_channels
+        self.linear_mu = torch.nn.Linear(final_embedding_dim, out_channels)
+        self.linear_logstd = torch.nn.Linear(final_embedding_dim, out_channels)
+
+    def forward(self, x, edge_index, batch):
+        # FIX: Implement a sequential forward pass
+        for i in range(self.num_layers):
+            x_input = x  # Store input for potential skip connection
+
+            # Pass the output of the previous layer as input to the current one
+            x = self.convs[i](x, edge_index)
+                        
+            x_out = self.norm(x)
+        
+            if self.skip_connection and x_input.shape == x.shape:
+                x = x_out + x_input
+
+        
+            else:
+                # This can happen if the first layer changes the channel size.
+                # In that case, you might skip the residual on the first layer or project x_input.
+                x = x_out
+                
+            if i < self.num_layers - 1:
+                x = self.norm(x)
+                x = F.leaky_relu(x)
+
+        # Global pooling happens after all layers are done
+        x = global_mean_pool(x, batch)
+
+        # Calculate mu and logstd from the final graph-level embedding
+        mu = self.linear_mu(x)
+        logstd = self.linear_logstd(x)
+
+        return mu, logstd
+
 
 # class SAGE_encoder(torch.nn.Module):
 #     def __init__(self, in_channels, out_channels, hidden_channels, num_layers=2, attention=False, heads=1, batch_norm=False):
@@ -203,6 +270,43 @@ class SAGE_encoder(torch.nn.Module):
 #         return mu, logstd
 
 
+# class MLP_Decoder(torch.nn.Module):
+#     def __init__(self, latent_dim, out_nodes, out_features, hidden_channels, num_layers=3):
+#         super().__init__()
+    
+#         self.out_nodes = out_nodes
+#         self.out_features = out_features
+#         self.hidden_channels = hidden_channels
+#         self.num_layers = num_layers
+
+#         self.skip_connections = True
+
+#         layers = []
+#         layers.append(torch.nn.Linear(latent_dim, hidden_channels))
+#         layers.append(torch.nn.SiLU())  # added SiLU activation after the first layer and changed ReLU to SiLU in the other layers
+#         for i in range(num_layers - 1):
+#             layers.append(torch.nn.Linear(hidden_channels, hidden_channels))
+#             layers.append(torch.nn.SiLU())
+#         layers.append(torch.nn.Linear(hidden_channels, out_nodes * out_features*2)) # added a 2
+#         self.fc = torch.nn.Sequential(*layers)
+
+#     def forward(self, z):
+
+#         # x_recon = fc(z)
+#         # x_recon = torch.tanh(x_recon) #expect the output to be in the range [-1, 1]
+#         #return x_recon.view(-1, self.out_nodes, self.out_features)  # shape: [batch, nodes, features]
+        
+        
+#         logits = self.fc(z)
+#         reshaped_logits = logits.view(-1, self.out_nodes, self.out_features, 2)
+        
+#         x_coords = reshaped_logits[..., 0]
+#         y_coords = reshaped_logits[..., 1]
+        
+#         x_recon_radians = torch.atan2(y_coords, x_coords)        
+       
+#         return x_recon_radians #.view(-1, self.out_nodes, self.out_features)  # shape: [batch, nodes, features]
+
 class MLP_Decoder(torch.nn.Module):
     def __init__(self, latent_dim, out_nodes, out_features, hidden_channels, num_layers=3):
         super().__init__()
@@ -214,32 +318,42 @@ class MLP_Decoder(torch.nn.Module):
 
         self.skip_connections = True
 
-        layers = []
-        layers.append(torch.nn.Linear(latent_dim, hidden_channels))
-        layers.append(torch.nn.SiLU())  # added SiLU activation after the first layer and changed ReLU to SiLU in the other layers
+        # Define layers explicitly
+        self.layers = torch.nn.ModuleList()
+        self.activations = torch.nn.ModuleList()
+        
+        # First layer
+        self.layers.append(torch.nn.Linear(latent_dim, hidden_channels))
+        self.activations.append(torch.nn.SiLU())
+
+        # Hidden layers
         for i in range(num_layers - 1):
-            layers.append(torch.nn.Linear(hidden_channels, hidden_channels))
-            layers.append(torch.nn.SiLU())
-        layers.append(torch.nn.Linear(hidden_channels, out_nodes * out_features*2)) # added a 2
-        self.fc = torch.nn.Sequential(*layers)
+            self.layers.append(torch.nn.Linear(hidden_channels, hidden_channels))
+            self.activations.append(torch.nn.SiLU())
+        
+        # Output layer
+        self.final = torch.nn.Linear(hidden_channels, out_nodes * out_features * 2)
 
     def forward(self, z):
+        x = z
+        for i in range(self.num_layers):
+            x_in = x
+            x = self.layers[i](x)
+            x = self.activations[i](x)
 
-        # x_recon = fc(z)
-        # x_recon = torch.tanh(x_recon) #expect the output to be in the range [-1, 1]
-        #return x_recon.view(-1, self.out_nodes, self.out_features)  # shape: [batch, nodes, features]
+            # apply skip connection if dimensions match
+            if self.skip_connections and x.shape == x_in.shape:
+                x = x + x_in  
 
-    
-        
-        logits = self.fc(z)
+        logits = self.final(x)
         reshaped_logits = logits.view(-1, self.out_nodes, self.out_features, 2)
-        
+
         x_coords = reshaped_logits[..., 0]
         y_coords = reshaped_logits[..., 1]
-        
-        x_recon_radians = torch.atan2(y_coords, x_coords)        
-       
-        return x_recon_radians #.view(-1, self.out_nodes, self.out_features)  # shape: [batch, nodes, features]
+
+        # return angles in radians
+        x_recon_radians = torch.atan2(y_coords, x_coords)
+        return x_recon_radians
 
 
 
