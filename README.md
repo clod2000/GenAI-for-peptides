@@ -52,7 +52,8 @@ GenAI-for-peptides/
 │       │   ├── dutils.py     # Utility functions for dihedral models
 |
 |
-├── PIGVAE/                        # Experimental version to address problems encountered in FULL_ATOM (please ignore it for now)
+├── PIGVAE/                        # Experimental version to address problems encountered
+                                   # in FULL_ATOM (please ignore it for now)
 
 ```
 
