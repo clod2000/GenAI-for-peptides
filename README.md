@@ -1,88 +1,126 @@
 # GenAI-for-peptides
 
-This repository contains the code and resources for my master's thesis, which focuses on applying generative artificial intelligence and geometric deep learning to peptide molecular data. The project aims to advance the modeling and generation of peptide structures using modern machine learning techniques.
+This repository contains the code and resources for my master's thesis, which explores generative artificial intelligence and geometric deep learning for peptide molecular data. The project focuses on graph-based neural architectures for learning, generating, and analyzing peptide structures, integrating physical chemistry principles via classical force fields.
+
+---
 
 ## Project Overview
 
-The main objective of this project is to develop and explore Variational Autoencoders (VAEs) enhanced with geometric neural networks (notably EGNNs) for learning and generating peptide structures from molecular dynamics (MD) simulations.
+The main objective is to develop and investigate Variational Autoencoders (VAEs) enhanced with geometric neural networks (especially EGNNs) for learning and generating peptide structures from molecular dynamics (MD) simulations. A core innovation is the integration of differentiable physics-based loss functions (force fields), enforcing chemical realism in generated conformations. Both full-atom and dihedral-angle-based models are supported.
+
+---
 
 ## Features
 
-- **Automated conversion of MD trajectories into full-atom graph representations** using customizable preprocessing scripts.
-- **Full-atom graph-based modeling of peptides.**
-- **Flexible VAE architectures** (including original and hybrid displacement versions).
-- **Support for trajectory data preprocessing and feature scaling.**
-- **Customizable training scripts with configuration templates.**
-- **Visualization utilities for molecular graph data.**
+- **Automated conversion of MD trajectories into full-atom graph representations** via customizable scripts.
+- **Full-atom graph-based and dihedral-angle-based modeling of peptides.**
+- **Flexible VAE architectures:** original and hybrid displacement versions.
+- **Trajectory data preprocessing, feature scaling, and coordinate alignment.**
+- **Customizable training scripts and configuration templates.**
+- **Visualization utilities** for molecular graph data and generated structures.
+- **Differentiable force field integration:** bond, angle, Lennard-Jones (and advanced nonbonded terms).
+- **Batch-wise physics loss** for physically meaningful regularization.
+- **Analysis suite:** for reconstruction quality, latent space visualization, generation, and interpolation.
+
+---
 
 ## Project Structure
 
-Below is a schematic overview of the main directories and files:
 ```
 GenAI-for-peptides/
 ├── FULL_ATOM/
 │   └── CODES/
-│       ├── fmain.py                  # Main entry point for full-atom VAE training
-│       ├── single_sim.sh             # Bash script for running simulation batches
+│       ├── fmain_analysis.py         # Training and analysis with force field loss
 │       ├── test.sh                   # Bash script for test runs with different hyperparameters
 │       ├── config.template.in        # Template config for experiments
-│       ├── notebook_hybrid.ipynb     # Reference Jupyter notebook
 │       ├── LIBS/
-│       │   ├── FGVAE.py              # VAE model definition with EGNN encoder
-│       │   ├── egnn_clean.py         # EGNN layer implementation (adapted from original source)
-│       │   ├── utils.py              # Data handling and utility functions
-│       │   └── create_full_graph_data.py # Graph data preprocessing and visualization
-│       └── configs/
-│           └── test/
-│               └── sim_lr_0.0001_layers_3_kl_min_0.01_latent_dim_64.in
-├── DIHEDRALS/                        # Simpler GVAE for dihedral angles (code exists, pending cleanup and comments)
+│           ├── FGVAE.py              # VAE model definition with EGNN encoder/decoder
+│           ├── egnn_clean.py         # EGNN layer implementation (adapted from original source)
+│           ├── utils.py              # Data handling, preprocessing, loss, and visualization
+│           ├── create_full_graph_data.py # Graph data preprocessing and visualization
+│           ├── force_field.py        # Differentiable force field module (energy loss)
+│           ├── upgraded_ff.py        # Advanced force field with Coulomb and 1-4 exceptions
+│           ├── old_force_field.py    # Legacy/alternate force field implementations
+│           └── weight_check.py       # Model health diagnostics
+|
+|
+├── DIHEDRALS/                        # Simpler GVAE for dihedral angles (see below)
+│   ├── CODES/
+│       ├── dmain.py                  # Main script for dihedral-based VAE training
+│       ├── LIBS/
+│       │   ├── DGVAE.py              # Dihedral VAE model definition
+│       │   ├── dutils.py     # Utility functions for dihedral models
+|
+|
+├── PIGVAE/                        # Experimental version to address problems encountered in FULL_ATOM (please ignore it for now)
+
 ```
+
+---
 
 ## Main Components
 
-### `fmain.py`
-The main script for configuring, training, and evaluating the VAE models. Parameters are set via a config file.
+### Full-Atom Modeling
 
-### `LIBS/`
-This directory contains implementations for the EGNN layers, VAE architecture, and utility functions for data loading and processing.
+- **`fmain_analysis.py`**: Main script for configuring, training, and evaluating the full-atom VAE models. Support both standard and physics-regularized training modes.
+- **`LIBS/` directory**: Contains EGNN layers, VAE architecture, data utilities, advanced loss functions, visualization, and force field modules.
 
-> **Note**: The `egnn_clean.py` library is adapted from [EGNN by vgsatorras](https://github.com/vgsatorras/egnn/tree/3c079e7267dad0aa6443813ac1a12425c3717558).
+### Dihedral Angle Modeling
 
-#### `LIBS/create_full_graph_data.py`
+The DIHEDRALS module provides a streamlined alternative for learning on molecular dihedral angles (torsions), which are lower-dimensional but critical for peptide backbone conformation. This module is particularly suitable for fast prototyping, coarse-grained studies, or as a baseline.
 
-This script is essential for converting MD simulation data (GROMACS `.tpr`/`.xtc`) into datasets of molecular graphs suitable for geometric deep learning:
+- **`DIHEDRALS/CODES/dmain.py`**: Main script for training a Graph VAE on dihedral angle data.
+- **`DGVAE.py`**: Model definition for dihedral-based VAE.
+- **`dutils.py`**: Data preprocessing, reconstruction, and loss functions specific to dihedral angles.
 
-- **TrajectoryDataset class**: Loads MD trajectories, selects atoms, computes static features (atom type, charge, etc.), and generates edge indices based on chemical bonds.
-- **Automatic batching**: Processes each trajectory frame into a PyTorch Geometric graph object.
-- **Visualization**: Functions for 2D/3D graph plotting with per-atom coloring, useful for reports or debugging.
-- **Extensible feature engineering**: Easily add new atomic features.
-- **CLI Example**: The script can be run directly to create datasets and plot sample graphs.
+**Features of Dihedral Modeling:**
+- Converts MD trajectories to sequences of backbone dihedral angles (e.g., phi/psi/omega).
+- Builds simplified graph representations where nodes are residues and edges reflect peptide connectivity.
+- Loss functions measure angular reconstruction accuracy (with periodicity handling).
+- Fast training and inference due to reduced dimensionality.
+- Visualization and analysis tools for angle distributions, latent space, and generative sampling.
+- Can be used standalone or as a complement to full-atom modeling.
 
-#### `LIBS/utils.py`
+---
 
-A companion module providing essential utilities for modeling:
+## Force Field Integration
 
-- `get_dataset`: Loads, preprocesses, scales, and (optionally) aligns graph datasets; handles one-hot encoding of atom types and feature normalization.
-- `find_rigid_alignment`: Implements the Kabsch algorithm for frame alignment (crucial for geometric losses).
-- `get_dataloaders`: Splits datasets into training/validation/test sets and constructs PyTorch DataLoaders.
-- `parse_config`: Reads experiment parameters from configuration files.
-- **Loss functions**: Includes KL-divergence and advanced position reconstruction loss with batch alignment.
-- **Visualization**: High-level plotting routines for datasets and model predictions (2D/3D).
+This project integrates a differentiable classical force field (FF) module to enhance molecular structure learning and enforce physical plausibility of generated peptides. The force field is implemented in [`LIBS/force_field.py`](FULL_ATOM/CODES/LIBS/force_field.py) and optionally [`LIBS/upgraded_ff.py`](FULL_ATOM/CODES/LIBS/upgraded_ff.py), and is based on parameters extracted from standard molecular mechanics force fields via OpenMM (`amber99sb.xml`, `tip3p.xml`):
 
-### `notebook_hybrid.ipynb`
-A Jupyter notebook for experiments and exploratory data analysis, demonstrating the use of the main library components.
+- **Bonded interactions**: Harmonic bond stretching and angle bending.
+- **Nonbonded interactions**: Lennard-Jones (van der Waals) potential.
+- **(Advanced, optional)**: Coulomb interactions and 1-4 scaling via upgraded_ff.
 
-### `config.template.in`
-A template configuration file that defines the architecture and training parameters for experiments. Bash scripts use this template to generate configs for batch runs.
+**Features:**
 
-### `single_sim.sh` and `test.sh`
-Shell scripts for automating hyperparameter sweeps and organizing output/logs.
+- **OpenMM-based parameter extraction**: Loads all relevant parameters from a reference PDB structure.
+- **Differentiable energy loss**: Computes physics-based energy terms for each structure in a batch, integrating with PyTorch autograd.
+- **Configurable loss weighting**: Select which energy terms to include and their weights via config (e.g. enable/disable bond, angle, LJ).
+- **Annealing and scheduling**: Physics loss weight can be annealed during training to gradually enforce physical constraints.
+- **Energy calculation for analysis**: Direct comparison between generated and real structures using OpenMM reference energies.
+
+**Usage:**  
+Enable force field regularization by setting `USE_FORCE_FIELD: True` in your config file, and provide a suitable PDB file via `PDB_FOR_ENERGY`. You may configure which energy terms to include (bond, angle, LJ) and their weights.
+
+Example config snippet:
+```
+USE_FORCE_FIELD: True
+PDB_FOR_ENERGY: ../DATA/raw/protein_only.pdb
+USE_BOND_FF: True
+USE_ANGLE_FF: True
+USE_LJ_FF: True
+LAMBDA_ENERGY: 0.001
+```
+
+---
 
 ## Data Availability
 
-The molecular dynamics datasets used in this project are generated from GROMACS simulations of tetraaline molecules brought to equilibrium. These simulation trajectories (typically as `.tpr` and `.xtc` files) provide the structural data that is converted into graph representations for model training and evaluation.
+The molecular dynamics datasets used in this project are generated from GROMACS simulations of tetraaline molecules brought to equilibrium. Simulation trajectories (typically `.tpr` and `.xtc`) are not included in the repo due to size, but scripts are provided to convert compatible GROMACS output to graph datasets (full-atom and dihedral).
 
-If you wish to use your own data, ensure that your MD simulations are compatible with the preprocessing scripts, which expect GROMACS trajectory and topology file formats.
+If you wish to use your own data, ensure your MD simulations are compatible with the preprocessing scripts, which expect GROMACS trajectory and topology file formats.
+
+---
 
 ## Getting Started
 
@@ -92,9 +130,10 @@ If you wish to use your own data, ensure that your MD simulations are compatible
 - PyTorch
 - PyTorch Geometric
 - MDAnalysis
+- OpenMM (for force field module)
 - Additional libraries as required by the code
 
-You may need to install extra dependencies via `pip` or `conda`.
+You may need to install extra dependencies via `pip` or `conda`, especially for molecular simulation and analysis.
 
 ### Example Usage
 
@@ -106,19 +145,42 @@ You may need to install extra dependencies via `pip` or `conda`.
 
 2. **Prepare your configuration file**, or use the provided template and modify as needed.
 
-3. **Run a single experiment:**
+3. **Run a single experiment (full-atom):**
     ```sh
     python fmain.py --config config.template.in
     ```
 
-4. **For batch experiments, use the provided shell scripts:**
+4. **For dihedral experiments:**
+    ```sh
+    cd ../../DIHEDRALS/CODES
+    python dmain.py --config config.dihedral.in
+    ```
+
+5. **For batch experiments, use the provided shell scripts:**
     ```sh
     bash single_sim.sh
     ```
 
+---
+
+## Analysis Suite
+
+After training, the analysis routines provide:
+
+- **Reconstruction quality**: RMSD, angular error, visual overlays, and energy comparison for best/worst reconstructions.
+- **Latent space visualization**: PCA plots colored by physical energy or angle statistics.
+- **Generative sampling**: Generation of new structures, energy/angle distribution comparison, and PDB export.
+- **Interpolation**: Smooth interpolation in latent space with trajectory and GIF export.
+
+See `fmain_analysis.py`, `LIBS/utils.py`, and DIHEDRALS analysis scripts for details.
+
+---
+
 ## Current Status
 
 This project is under active development as part of my master's thesis. Expect frequent changes and refactoring.
+
+---
 
 ## Author
 
@@ -126,4 +188,4 @@ Claudio Colturi
 
 ---
 
-> _This repository is part of my master's thesis and is a work in progress. Contributions, suggestions, and feedback are welcome!_
+_This repository is part of my master's thesis and is a work in progress. Contributions, suggestions, and feedback are welcome!_
