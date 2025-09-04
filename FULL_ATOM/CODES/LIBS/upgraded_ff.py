@@ -1,5 +1,3 @@
-# --- START OF FILE force_field.py ---
-
 import torch
 import openmm as mm
 from openmm import app, unit

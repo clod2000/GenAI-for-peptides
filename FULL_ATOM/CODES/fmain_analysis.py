@@ -66,13 +66,8 @@ except Exception as e:
 
 if verbose: print(f"Configuration parameters: {config}")
 
-#exit()
-
-
 # EXTRA PARAMETERS NOT IN THE CONFIG FILE
 INSPECT_MODEL_STATE = False
-
-
 
 # PARAMETERS IN THE CONFIG FILE
 
@@ -175,9 +170,6 @@ else:
 # Set the random seed for reproducibility
 np.random.seed(SEED)
 torch.manual_seed(SEED)
-
-
-#device = torch.device( 'cpu')
 
 # Create dataset and dataloaders
 

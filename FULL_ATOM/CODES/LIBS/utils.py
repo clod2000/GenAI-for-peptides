@@ -615,14 +615,6 @@ def beta_annealer(epochs,beta_start = 0., beta_end = 1., annealing_epochs = 100,
 #     return lambda_start + (lambda_end - lambda_start) * min(1,((epochs-wait_epochs) / annealing_epochs))
 
 
-
-
-
-
-
-
-
-
 ############################# Visualization functions #############################
 
 
@@ -1179,10 +1171,6 @@ def log_standard_normal(x):
     return log_normal_pdf(x, torch.zeros_like(x), torch.zeros_like(x))
 
 
-# ==============================================================================
-# PROPOSED NEW PHYSICS LOSS FUNCTION FOR Putils.py
-# ==============================================================================
-
 def compute_physics_loss(energy_calculator, pos_pred, batch, 
                          bond_weight=1.0, angle_weight=0.5, lj_weight=0.1, use_log=False):
     """
@@ -1212,8 +1200,6 @@ def compute_physics_loss(energy_calculator, pos_pred, batch,
         # Assumes your energy_calculator returns a tuple of energies
         bond_e, angle_e, lj_e = energy_calculator(coords)
 
-        # Log transform is crucial for stability! It punishes high energies
-        # without creating exploding gradients.
         if use_log:
             bond_e = torch.log1p(bond_e)
             angle_e = torch.log1p(angle_e)
@@ -1236,8 +1222,6 @@ def compute_physics_loss(energy_calculator, pos_pred, batch,
         total_lj_e /= num_graphs
     
     return total_loss, total_bond_e, total_angle_e, total_lj_e
-
-
 
 
 ####### OTHER ANNEALING FUNCTIONS ########
