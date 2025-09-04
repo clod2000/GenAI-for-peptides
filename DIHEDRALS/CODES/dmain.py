@@ -79,16 +79,9 @@ NUM_ENC_LAYERS = config.get('NUM_ENC_LAYERS', 5) # number of EGNN layers in the 
 ATTENTION_ENCODER = config.get('ATTENTION_ENCODER', True) # if True, attention is used in the encoder
 HEADS_ENCODER = config.get('HEADS_ENCODER', 2) # number of attention heads in the encoder
 LATENT_DIM = config.get('LATENT_DIM', 128) # latent dimension of the encoder, used to create the latent space
-#TANH_ENCODER = config.get('TANH_ENCODER', True) # if True, the output of the encoder is passed through a tanh activation function (for positions)
-#NORMALIZE_ENCODER = config.get('NORMALIZE_ENCODER', True) # if True, the encoder output is normalized
-# decoder
 
 HIDDEN_DECODER_CHANNELS = config.get('HIDDEN_DECODER_CHANNELS', 256)
 NUM_DEC_LAYERS = config.get('NUM_DEC_LAYERS', 5)
-# ATTENTION_DECODER = config.get('ATTENTION_DECODER', True)
-# TANH_DECODER = config.get('TANH_DECODER', True) # if True, the output of the decoder is passed through a tanh activation function (for positions)
-# NORMALIZE_DECODER = config.get('NORMALIZE_DECODER', True) # if True, the decoder output is normalized
-
 
 #### training parameters
 EPOCHS = config.get('EPOCHS', 50)
@@ -159,23 +152,12 @@ if verbose: print(f"Input channels: {inchannels}")
 out_channels = dataset[0].num_nodes
 if verbose: print(f"Output channels: {out_channels}")
 
-
-# if  ENCODER_TYPE == 'SAGE':
-#     encoder = SAGE_encoder(inchannels, LATENT_DIM, HIDDEN_ENCODER_CHANNELS, num_layers=NUM_ENC_LAYERS, attention=ATTENTION_ENCODER, heads=HEADS_ENCODER)
-# else:   
-#     encoder = GCN_encoder(inchannels, LATENT_DIM, HIDDEN_ENCODER_CHANNELS, num_layers=NUM_ENC_LAYERS, attention=ATTENTION_ENCODER, heads=HEADS_ENCODER)
-
 encoder = encoder(inchannels, LATENT_DIM, HIDDEN_ENCODER_CHANNELS, enc_type=ENCODER_TYPE, num_layers=NUM_ENC_LAYERS, attention=ATTENTION_ENCODER, heads=HEADS_ENCODER)
-
 decoder = MLP_Decoder(LATENT_DIM, out_channels, dataset.num_features, HIDDEN_DECODER_CHANNELS, num_layers=NUM_DEC_LAYERS)
-
 model = DVGAE(encoder, decoder,device=device)
-
-
 model = model.to(device)
 
 if verbose: print(f"Model created with encoder type {ENCODER_TYPE} and latent dimension {LATENT_DIM}")
-
 
 if CONTINUE_FROM is not None:
     print(f"Loading model from {CONTINUE_FROM}")
@@ -184,19 +166,13 @@ if CONTINUE_FROM is not None:
     model.load_state_dict(torch.load(CONTINUE_FROM, map_location=device))
     print("Model loaded successfully.")
 
-
-
 # Freeze the encoder if specified
 if FREEZE_ENCODER:
     for param in model.encoder.parameters():
         param.requires_grad = False
     if verbose: print("Encoder parameters are frozen. Only the decoder will be trained.")
-    
-    
-
+      
 if verbose: print_model_summary(model)
-
-
 
 # Create the optimizer
 optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
@@ -246,6 +222,8 @@ writer = SummaryWriter(log_dir=file_path)
 # Training loop
 lr = LEARNING_RATE
 
+# ___________________________________ TRAINING LOOP ___________________________________ #
+
 for epoch in range(STARTING_EPOCH, STARTING_EPOCH + EPOCHS):
 
     # --- LR WARM-UP LOGIC ---
@@ -256,7 +234,6 @@ for epoch in range(STARTING_EPOCH, STARTING_EPOCH + EPOCHS):
             param_group['lr'] = LEARNING_RATE * lr_scale
     # After warm-up, the LR is the standard one (and can be controlled by a scheduler)
     
-
     if USE_SCHEDULER and epoch >= WARMUP_EPOCHS:
         if lr > scheduler.get_last_lr()[0]:
             print(f"Adjusting learning rate from {lr} to {scheduler.get_last_lr()[0]}")
@@ -325,10 +302,6 @@ for epoch in range(STARTING_EPOCH, STARTING_EPOCH + EPOCHS):
         train_kl_sep_loss += kl_loss_value.item()
         train_mi_loss += mi_loss_value.item()
         train_tc_loss += tc_loss_value.item()
-
-
-
-
 
         # Update the progress bar
         if ADVANCED_KL_LOSS:
@@ -422,7 +395,6 @@ for epoch in range(STARTING_EPOCH, STARTING_EPOCH + EPOCHS):
         scheduler.step(val_loss)
     elif USE_SCHEDULER:
         scheduler.step()
-
 
     # Log the validation losses to TensorBoard
     writer.add_scalar('Loss/val', val_loss, epoch)

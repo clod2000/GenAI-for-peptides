@@ -326,8 +326,6 @@ def beta_annealer(epochs,beta_start = 0., beta_end = 1., annealing_epochs = 100,
     return beta_start + (beta_end - beta_start) * min(1,((epochs-wait_epochs) / annealing_epochs))
 
 
-
-
 ############## Analysis and Visualization Functions ##############
 
 def ramachandran_plot(df_pred, df_true, color = 'blue', save_path=None):
