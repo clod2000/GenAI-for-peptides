@@ -1,6 +1,6 @@
 #!/bin/sh
 
-# This script is used to run the main_fgvae.py with specific parameters.
+# This script is used to run the fmain_analysis.py with specific parameters.
 
 # --- Configuration ---
 # The base template for the config file
@@ -51,7 +51,7 @@ for lr in 0.0001; do
 
           # 4. Run your python script, passing the temporary config file
           #    Redirect output to a log file for this specific run
-          python fmain.py --config "${TEMP_CONFIG}" > "${TEMP_LOG}" 2>&1
+          python fmain_analysis.py --config "${TEMP_CONFIG}" > "${TEMP_LOG}" 2>&1
 
           # The '2>&1' redirects both standard output and standard error to the log file.
           

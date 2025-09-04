@@ -2,6 +2,8 @@
 __pycache__/
 *.so
 
+.gitignore
+
 # Virtual environments
 venv/
 .env/
@@ -23,6 +25,7 @@ Thumbs.db
 *.log
 CODES/logs/
 CODES/configs/
+CODES/plot_data
 
 # Heavy directories
 DATA/
